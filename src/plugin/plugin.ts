@@ -102,7 +102,7 @@ export function createChannelNotification(message: InboundMessageFrame): {
         from: message.from,
         type: message.type,
         message_id: message.message_id,
-        reply_to: message.reply_to ?? "",
+        ...(message.reply_to ? { reply_to: message.reply_to } : {}),
         ...(message.team ? { team: message.team } : {}),
       },
     },

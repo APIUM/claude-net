@@ -132,7 +132,7 @@ export class Registry {
     if (name.includes("@")) {
       const entry = this.agents.get(name);
       if (!entry) {
-        return { ok: false, error: `Agent '${name}' is not online` };
+        return { ok: false, error: `Agent '${name}' is not online.` };
       }
       return { ok: true, entry };
     }
@@ -146,7 +146,7 @@ export class Registry {
     }
 
     if (matches.length === 0) {
-      return { ok: false, error: `Agent '${name}' is not online` };
+      return { ok: false, error: `Agent '${name}' is not online.` };
     }
     if (matches.length === 1) {
       // biome-ignore lint/style/noNonNullAssertion: length check guarantees index 0 exists

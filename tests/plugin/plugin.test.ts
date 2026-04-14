@@ -39,7 +39,7 @@ describe("plugin helpers", () => {
       expect(notification.params.meta.from).toBe("alice@laptop");
       expect(notification.params.meta.type).toBe("message");
       expect(notification.params.meta.message_id).toBe("msg-123");
-      expect(notification.params.meta.reply_to).toBe("");
+      expect(notification.params.meta.reply_to).toBeUndefined();
       expect(notification.params.meta.team).toBeUndefined();
     });
 
