@@ -6,7 +6,9 @@
     "dev": "bun --watch src/hub/index.ts",
     "test": "bun test",
     "lint": "biome check .",
-    "fmt": "biome format --write ."
+    "fmt": "biome format --write .",
+    "docker:build": "docker build -t claude-net .",
+    "docker:run": "docker run -p 4815:4815 claude-net"
   },
   "dependencies": {
     "elysia": "^1.2.25",
