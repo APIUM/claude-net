@@ -33,7 +33,7 @@ echo "Registering claude-net MCP server..."
 claude mcp add \\
   -e CLAUDE_NET_HUB=http://\${HUB} \\
   --transport stdio \\
-  claude-net -- bash -c 'curl -fsSL http://\${CLAUDE_NET_HUB}/plugin.ts | bun run -'
+  claude-net -- bash -c 'P=$(mktemp /tmp/claude-net-plugin.XXXXXX.ts) && curl -fsSL \${CLAUDE_NET_HUB}/plugin.ts -o "\$P" && exec bun run "\$P"'
 
 echo ""
 echo "claude-net registered. Start Claude Code with:"

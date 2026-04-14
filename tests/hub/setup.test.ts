@@ -63,8 +63,8 @@ describe("Setup endpoint", () => {
     expect(body).toContain("set -e");
     expect(body).toContain("claude mcp add");
     expect(body).toContain("CLAUDE_NET_HUB=http://${HUB}");
-    expect(body).toContain("curl -fsSL");
-    expect(body).toContain("bun run -");
+    expect(body).toContain("curl -fsSL ${CLAUDE_NET_HUB}/plugin.ts");
+    expect(body).toContain("bun run");
   });
 
   test("response content-type is text/plain", async () => {
