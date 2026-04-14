@@ -1,0 +1,23 @@
+{
+  "name": "claude-net",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/hub/index.ts",
+    "test": "bun test",
+    "lint": "biome check .",
+    "fmt": "biome format --write ."
+  },
+  "dependencies": {
+    "elysia": "^1.2.25",
+    "@elysiajs/static": "^1.2.0",
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.2.9",
+    "@types/ws": "^8.18.0",
+    "typescript": "^5.8.3"
+  }
+}
