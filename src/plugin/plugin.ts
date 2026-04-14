@@ -71,7 +71,8 @@ Inbound messages from other agents arrive as <channel> tags:
   </channel>
 
 Available tools:
-- register(name) — override your default identity
+- whoami() — return your current registered name, or an error if not registered
+- register(name) — override your default identity (required on name clash)
 - send_message(to, content, reply_to?) — send to an agent by name (full "name@host" or short "name")
 - broadcast(content) — send to all online agents
 - send_team(team, content, reply_to?) — send to all online members of a team
@@ -79,6 +80,12 @@ Available tools:
 - leave_team(team) — leave a team
 - list_agents() — list all agents with status
 - list_teams() — list all teams with members
+
+On startup the plugin auto-registers as basename(cwd)@hostname. If the
+name is already taken (another session in the same folder on the same
+host), you will receive a <channel> notification from system@claude-net
+at startup telling you so. In that case, call register(name) with a
+different name before using any messaging tools.
 
 Messages to offline agents will fail — there is no queuing.
 Always include reply_to when responding to a specific message.
@@ -157,6 +164,7 @@ function log(msg: string): void {
 
 let ws: WebSocket | null = null;
 let storedName = "";
+let registeredName = "";
 let hubWsUrl = "";
 let reconnectDelay = RECONNECT_INITIAL_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -173,6 +181,23 @@ const pendingRequests = new Map<
 
 function isConnected(): boolean {
   return ws !== null && ws.readyState === WebSocket.OPEN;
+}
+
+function emitSystemNotification(content: string): void {
+  if (!mcpServer) return;
+  mcpServer
+    .notification({
+      method: "notifications/claude/channel",
+      params: {
+        content,
+        meta: {
+          from: "system@claude-net",
+          type: "message",
+          message_id: crypto.randomUUID(),
+        },
+      },
+    })
+    .catch((err: unknown) => log(`Failed to emit system notification: ${err}`));
 }
 
 function request(frame: Record<string, unknown>): Promise<unknown> {
@@ -248,8 +273,18 @@ function connectWebSocket(): void {
     // Auto-register with stored name
     if (storedName) {
       request({ action: "register", name: storedName })
-        .then(() => log(`Auto-registered as ${storedName}`))
-        .catch((err: unknown) => log(`Auto-registration failed: ${err}`));
+        .then(() => {
+          registeredName = storedName;
+          log(`Auto-registered as ${storedName}`);
+        })
+        .catch((err: unknown) => {
+          registeredName = "";
+          const message = err instanceof Error ? err.message : String(err);
+          log(`Auto-registration failed: ${message}`);
+          emitSystemNotification(
+            `claude-net auto-registration failed: ${message}\n\nCall the register tool with a different name before using any messaging tools. The default name "${storedName}" is already taken — likely another Claude Code session in the same folder on this host.`,
+          );
+        });
     }
   });
 
@@ -282,6 +317,16 @@ function scheduleReconnect(): void {
 // ── Tool definitions ──────────────────────────────────────────────────────
 
 const TOOL_DEFINITIONS = [
+  {
+    name: "whoami",
+    description:
+      "Return your currently registered agent name, or an error if not registered",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
   {
     name: "register",
     description: "Override your default identity with a custom name",
@@ -401,6 +446,16 @@ async function handleToolCall(
   isError?: boolean;
   content: { type: "text"; text: string }[];
 }> {
+  // whoami is handled locally — no hub round-trip
+  if (name === "whoami") {
+    if (!registeredName) {
+      return notConnectedError(
+        "Not registered with the hub. Call the register tool with a name to claim an identity.",
+      );
+    }
+    return toolResult({ name: registeredName });
+  }
+
   if (!hubWsUrl) {
     return notConnectedError(
       "Not connected — CLAUDE_NET_HUB environment variable not set.",
@@ -421,9 +476,10 @@ async function handleToolCall(
   try {
     const data = await request(frame);
 
-    // Update stored name on successful register
+    // Update stored+registered name on successful register
     if (name === "register" && args.name) {
       storedName = args.name;
+      registeredName = args.name;
     }
 
     return toolResult(data);
