@@ -4,7 +4,8 @@ import { Registry } from "./registry";
 import { Router } from "./router";
 import { setupPlugin } from "./setup";
 import { Teams } from "./teams";
-import { wsPlugin } from "./ws-plugin";
+import { broadcastToDashboards, wsDashboardPlugin } from "./ws-dashboard";
+import { setDashboardBroadcast, wsPlugin } from "./ws-plugin";
 
 const port = Number(process.env.CLAUDE_NET_PORT) || 4815;
 const startedAt = new Date();
@@ -20,11 +21,24 @@ registry.setTimeoutCleanup((fullName, agentTeams) => {
   }
 });
 
+// Wire dashboard broadcast into ws-plugin
+setDashboardBroadcast(broadcastToDashboards);
+
 // Resolve plugin.ts path relative to hub source directory
 const pluginPath = `${import.meta.dir}/../plugin/plugin.ts`;
+const dashboardPath = `${import.meta.dir}/dashboard.html`;
 let pluginCache: string | null = null;
+let dashboardCache: string | null = null;
 
 let app = new Elysia()
+  .get("/", async ({ set }) => {
+    if (!dashboardCache) {
+      const file = Bun.file(dashboardPath);
+      dashboardCache = await file.text();
+    }
+    set.headers["content-type"] = "text/html";
+    return dashboardCache;
+  })
   .get("/health", () => ({
     status: "ok",
     version: "0.1.0",
@@ -44,6 +58,7 @@ let app = new Elysia()
   .use(setupPlugin({ port }));
 
 app = wsPlugin(app, registry, teams, router);
+app = wsDashboardPlugin(app, registry, teams);
 app.listen(port);
 
 console.log(`claude-net hub listening on port ${port}`);

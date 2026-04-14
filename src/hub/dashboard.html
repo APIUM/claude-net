@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>claude-net</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #1a1b26;
+    --bg-surface: #24283b;
+    --bg-hover: #2f3349;
+    --border: #3b3f54;
+    --text: #c0caf5;
+    --text-muted: #565f89;
+    --text-dim: #737aa2;
+    --green: #9ece6a;
+    --red: #f7768e;
+    --blue: #7aa2f7;
+    --cyan: #7dcfff;
+    --orange: #ff9e64;
+    --purple: #bb9af7;
+    --yellow: #e0af68;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Header */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+
+  .header-stats {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .status-dot.online { background: var(--green); }
+  .status-dot.offline { background: var(--red); }
+
+  /* Main layout */
+  main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* Panels */
+  .panel {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .panel:last-child { border-right: none; }
+
+  .panel-header {
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-surface);
+    flex-shrink: 0;
+  }
+
+  .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+
+  /* Agent sidebar */
+  .sidebar { width: 200px; flex-shrink: 0; }
+
+  .agent-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .agent-item:hover { background: var(--bg-hover); }
+
+  .agent-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .agent-dot.online { background: var(--green); }
+  .agent-dot.offline { background: var(--text-muted); }
+
+  .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Message feed */
+  .feed { flex: 1; min-width: 0; }
+
+  .feed .panel-body { padding: 4px 8px; }
+
+  .msg-entry {
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-bottom: 2px;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .msg-entry:hover { background: var(--bg-hover); }
+
+  .msg-meta {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 1px;
+  }
+
+  .msg-route {
+    font-weight: 600;
+    font-size: 12px;
+  }
+
+  .msg-route.direct { color: var(--blue); }
+  .msg-route.broadcast { color: var(--orange); }
+  .msg-route.team { color: var(--purple); }
+
+  .msg-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .msg-content {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 80px;
+    overflow: hidden;
+  }
+
+  /* Teams panel */
+  .teams-panel { width: 220px; flex-shrink: 0; }
+
+  .team-item {
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+
+  .team-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    padding: 2px 0;
+    font-weight: 500;
+  }
+
+  .team-header:hover { color: var(--cyan); }
+
+  .team-count {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .team-members {
+    padding-left: 14px;
+    margin-top: 2px;
+  }
+
+  .team-member {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 0;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  /* Send bar */
+  .send-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .send-bar label {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .send-bar input, .send-bar select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .send-bar input:focus, .send-bar select:focus {
+    border-color: var(--blue);
+  }
+
+  #to-field { width: 160px; }
+  #msg-field { flex: 1; }
+
+  #send-btn {
+    background: var(--blue);
+    color: var(--bg);
+    border: none;
+    padding: 6px 16px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.1s;
+  }
+
+  #send-btn:hover { opacity: 0.85; }
+  #send-btn:disabled { opacity: 0.4; cursor: default; }
+
+  .send-error {
+    font-size: 12px;
+    color: var(--red);
+    margin-left: 4px;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>claude-net</h1>
+  <div class="header-stats">
+    <span id="agent-count">0 agents</span>
+    <span id="team-count">0 teams</span>
+    <span><span id="conn-dot" class="status-dot offline"></span><span id="conn-label">disconnected</span></span>
+  </div>
+</header>
+
+<main>
+  <div class="panel sidebar">
+    <div class="panel-header">Agents</div>
+    <div class="panel-body" id="agent-list"></div>
+  </div>
+
+  <div class="panel feed">
+    <div class="panel-header">Messages</div>
+    <div class="panel-body" id="msg-feed"></div>
+  </div>
+
+  <div class="panel teams-panel">
+    <div class="panel-header">Teams</div>
+    <div class="panel-body" id="team-list"></div>
+  </div>
+</main>
+
+<div class="send-bar">
+  <label for="to-field">To:</label>
+  <input type="text" id="to-field" placeholder="agent, broadcast, team:name" list="to-suggestions">
+  <datalist id="to-suggestions"></datalist>
+  <input type="text" id="msg-field" placeholder="Message content...">
+  <button id="send-btn">Send</button>
+  <span class="send-error" id="send-error"></span>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // --- State ---
+  const agents = new Map(); // fullName -> { name, fullName, status }
+  const teams = new Map();  // teamName -> { members: string[] }
+  const messages = [];       // { from, to, type, content, team?, timestamp, routeType }
+  const MAX_MESSAGES = 200;
+  const RECONNECT_INTERVAL = 3000;
+
+  // --- DOM refs ---
+  const agentListEl = document.getElementById('agent-list');
+  const msgFeedEl = document.getElementById('msg-feed');
+  const teamListEl = document.getElementById('team-list');
+  const agentCountEl = document.getElementById('agent-count');
+  const teamCountEl = document.getElementById('team-count');
+  const connDot = document.getElementById('conn-dot');
+  const connLabel = document.getElementById('conn-label');
+  const toField = document.getElementById('to-field');
+  const msgField = document.getElementById('msg-field');
+  const sendBtn = document.getElementById('send-btn');
+  const sendError = document.getElementById('send-error');
+  const toSuggestions = document.getElementById('to-suggestions');
+
+  // --- WebSocket ---
+  let ws = null;
+  let reconnectTimer = null;
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws/dashboard');
+
+    ws.onopen = function() {
+      setConnected(true);
+      if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+    };
+
+    ws.onmessage = function(e) {
+      var event;
+      try { event = JSON.parse(e.data); } catch { return; }
+      handleEvent(event);
+    };
+
+    ws.onclose = function() {
+      setConnected(false);
+      scheduleReconnect();
+    };
+
+    ws.onerror = function() {
+      // onclose will fire after this
+    };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setInterval(function() {
+      if (!ws || ws.readyState === WebSocket.CLOSED) {
+        connect();
+      }
+    }, RECONNECT_INTERVAL);
+  }
+
+  function setConnected(connected) {
+    connDot.className = 'status-dot ' + (connected ? 'online' : 'offline');
+    connLabel.textContent = connected ? 'connected' : 'disconnected';
+  }
+
+  // --- Event handling ---
+  function handleEvent(event) {
+    switch (event.event) {
+      case 'agent:connected':
+        agents.set(event.full_name, {
+          name: event.name,
+          fullName: event.full_name,
+          status: 'online'
+        });
+        renderAgents();
+        updateSuggestions();
+        break;
+
+      case 'agent:disconnected':
+        agents.delete(event.full_name);
+        renderAgents();
+        updateSuggestions();
+        break;
+
+      case 'message:routed':
+        addMessage(event);
+        break;
+
+      case 'team:changed':
+        if (event.action === 'deleted') {
+          teams.delete(event.team);
+        } else {
+          teams.set(event.team, { members: event.members || [] });
+        }
+        renderTeams();
+        updateSuggestions();
+        break;
+    }
+
+    updateCounts();
+  }
+
+  // --- Render agents ---
+  function renderAgents() {
+    var sorted = Array.from(agents.values()).sort(function(a, b) {
+      if (a.status !== b.status) return a.status === 'online' ? -1 : 1;
+      return a.fullName.localeCompare(b.fullName);
+    });
+
+    var html = '';
+    for (var i = 0; i < sorted.length; i++) {
+      var ag = sorted[i];
+      html += '<div class="agent-item" data-name="' + escapeAttr(ag.fullName) + '">'
+        + '<span class="agent-dot ' + ag.status + '"></span>'
+        + '<span class="agent-name">' + escapeHtml(ag.fullName) + '</span>'
+        + '</div>';
+    }
+    agentListEl.innerHTML = html;
+
+    // Bind click handlers
+    var items = agentListEl.querySelectorAll('.agent-item');
+    for (var j = 0; j < items.length; j++) {
+      items[j].addEventListener('click', function() {
+        toField.value = this.getAttribute('data-name');
+        msgField.focus();
+      });
+    }
+  }
+
+  // --- Render messages ---
+  function addMessage(event) {
+    var routeType = 'direct';
+    var toLabel = event.to;
+    if (event.to === 'broadcast') {
+      routeType = 'broadcast';
+      toLabel = 'broadcast';
+    } else if (event.team) {
+      routeType = 'team';
+      toLabel = 'team:' + event.team;
+    }
+
+    messages.push({
+      from: event.from,
+      to: toLabel,
+      type: event.type,
+      content: event.content,
+      timestamp: event.timestamp,
+      routeType: routeType
+    });
+
+    while (messages.length > MAX_MESSAGES) {
+      messages.shift();
+    }
+
+    renderLastMessage();
+  }
+
+  function renderLastMessage() {
+    var msg = messages[messages.length - 1];
+    if (!msg) return;
+
+    var el = document.createElement('div');
+    el.className = 'msg-entry';
+    el.innerHTML =
+      '<div class="msg-meta">'
+        + '<span class="msg-route ' + msg.routeType + '">'
+          + escapeHtml(msg.from) + ' &rarr; ' + escapeHtml(msg.to)
+        + '</span>'
+        + '<span class="msg-time">' + formatTime(msg.timestamp) + '</span>'
+      + '</div>'
+      + '<div class="msg-content">' + escapeHtml(msg.content) + '</div>';
+
+    msgFeedEl.appendChild(el);
+
+    // Remove excess DOM nodes
+    while (msgFeedEl.children.length > MAX_MESSAGES) {
+      msgFeedEl.removeChild(msgFeedEl.firstChild);
+    }
+
+    // Auto-scroll
+    msgFeedEl.scrollTop = msgFeedEl.scrollHeight;
+  }
+
+  // --- Render teams ---
+  function renderTeams() {
+    var html = '';
+    var teamNames = Array.from(teams.keys()).sort();
+    for (var i = 0; i < teamNames.length; i++) {
+      var tName = teamNames[i];
+      var team = teams.get(tName);
+      var members = team.members || [];
+
+      html += '<div class="team-item">'
+        + '<div class="team-header" data-team="' + escapeAttr(tName) + '">'
+          + '<span>' + escapeHtml(tName) + '</span>'
+          + '<span class="team-count">' + members.length + '</span>'
+        + '</div>'
+        + '<div class="team-members">';
+
+      for (var j = 0; j < members.length; j++) {
+        var memberName = members[j];
+        var ag = agents.get(memberName);
+        var status = ag ? ag.status : 'offline';
+        html += '<div class="team-member">'
+          + '<span class="agent-dot ' + status + '"></span>'
+          + '<span>' + escapeHtml(memberName) + '</span>'
+          + '</div>';
+      }
+
+      html += '</div></div>';
+    }
+    teamListEl.innerHTML = html;
+  }
+
+  // --- Update counts ---
+  function updateCounts() {
+    var onlineCount = 0;
+    agents.forEach(function(ag) { if (ag.status === 'online') onlineCount++; });
+    agentCountEl.textContent = onlineCount + ' agent' + (onlineCount !== 1 ? 's' : '');
+    teamCountEl.textContent = teams.size + ' team' + (teams.size !== 1 ? 's' : '');
+  }
+
+  // --- Update to-field suggestions ---
+  function updateSuggestions() {
+    var html = '<option value="broadcast">';
+    agents.forEach(function(ag) {
+      html += '<option value="' + escapeAttr(ag.fullName) + '">';
+    });
+    teams.forEach(function(_, tName) {
+      html += '<option value="team:' + escapeAttr(tName) + '">';
+    });
+    toSuggestions.innerHTML = html;
+  }
+
+  // --- Send message ---
+  function doSend() {
+    var to = toField.value.trim();
+    var content = msgField.value.trim();
+    sendError.textContent = '';
+
+    if (!to || !content) return;
+    sendBtn.disabled = true;
+
+    var url, body;
+    if (to === 'broadcast') {
+      url = '/api/broadcast';
+      body = { from: 'dashboard', content: content };
+    } else if (to.startsWith('team:')) {
+      url = '/api/send_team';
+      body = { from: 'dashboard', team: to.slice(5), content: content };
+    } else {
+      url = '/api/send';
+      body = { from: 'dashboard', to: to, content: content };
+    }
+
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      sendBtn.disabled = false;
+      if (data.error) {
+        sendError.textContent = data.error;
+      } else {
+        msgField.value = '';
+      }
+    })
+    .catch(function(err) {
+      sendBtn.disabled = false;
+      sendError.textContent = 'Send failed: ' + err.message;
+    });
+  }
+
+  sendBtn.addEventListener('click', doSend);
+  msgField.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    }
+  });
+
+  // --- Helpers ---
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str || '';
+    return div.innerHTML;
+  }
+
+  function escapeAttr(str) {
+    return (str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function formatTime(iso) {
+    if (!iso) return '';
+    try {
+      var d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch { return ''; }
+  }
+
+  // --- Init ---
+  connect();
+  updateCounts();
+})();
+</script>
+</body>
+</html>
