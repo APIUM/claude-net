@@ -72,7 +72,7 @@ Inbound messages from other agents arrive as <channel> tags:
 
 Available tools:
 - whoami() — return your current registered name, or an error if not registered
-- register(name) — override your default identity (required on name clash)
+- register(name) — claim a name (required on first use if default name is taken)
 - send_message(to, content, reply_to?) — send to an agent by name (full "name@host" or short "name")
 - broadcast(content) — send to all online agents
 - send_team(team, content, reply_to?) — send to all online members of a team
@@ -81,11 +81,22 @@ Available tools:
 - list_agents() — list all agents with status
 - list_teams() — list all teams with members
 
-On startup the plugin auto-registers as basename(cwd)@hostname. If the
-name is already taken (another session in the same folder on the same
-host), you will receive a <channel> notification from system@claude-net
-at startup telling you so. In that case, call register(name) with a
-different name before using any messaging tools.
+IDENTITY AND REGISTRATION:
+On startup the plugin tries to auto-register as basename(cwd)@hostname.
+This can silently fail if another session in the same folder on this host
+already claimed that name.
+
+The FIRST time the user asks you to do anything with claude-net
+(send a message, list agents, join a team, etc.) you MUST first call
+whoami() to confirm your identity. If whoami returns an error saying
+you are not registered, STOP and ask the user what name they would like
+this session to use. Explain that the default name was taken — likely
+because another Claude Code session in the same folder on this host
+claimed it first. After the user gives you a name, call register(name)
+to claim it, then proceed with their request.
+
+Do NOT pick a random or arbitrary name on behalf of the user. Names are
+how users address agents — the user needs to choose a meaningful one.
 
 Messages to offline agents will fail — there is no queuing.
 Always include reply_to when responding to a specific message.
@@ -282,7 +293,7 @@ function connectWebSocket(): void {
           const message = err instanceof Error ? err.message : String(err);
           log(`Auto-registration failed: ${message}`);
           emitSystemNotification(
-            `claude-net auto-registration failed: ${message}\n\nCall the register tool with a different name before using any messaging tools. The default name "${storedName}" is already taken — likely another Claude Code session in the same folder on this host.`,
+            `claude-net: the default name "${storedName}" is already taken (${message}). Ask the user what name to use for this session, then call the register tool with their chosen name before using any messaging tools. Do not pick a name on behalf of the user.`,
           );
         });
     }
@@ -450,7 +461,7 @@ async function handleToolCall(
   if (name === "whoami") {
     if (!registeredName) {
       return notConnectedError(
-        "Not registered with the hub. Call the register tool with a name to claim an identity.",
+        `Not registered with the hub. The default name "${storedName}" is already taken — likely another Claude Code session in the same folder on this host claimed it first. STOP and ask the user what name they would like this session to use, then call register(name) with their chosen name. Do not pick a name on behalf of the user.`,
       );
     }
     return toolResult({ name: registeredName });
@@ -465,6 +476,13 @@ async function handleToolCall(
   if (!isConnected()) {
     return notConnectedError(
       "Not connected to hub. Claude Code will auto-connect on next restart, or use register tool.",
+    );
+  }
+
+  // Block messaging tools when not registered — force the identity flow
+  if (name !== "register" && !registeredName) {
+    return notConnectedError(
+      `Cannot use claude-net messaging tools: this session is not registered. The default name "${storedName}" was already taken. STOP and ask the user what name they would like this session to use, then call register(name) with their chosen name before retrying.`,
     );
   }
 
