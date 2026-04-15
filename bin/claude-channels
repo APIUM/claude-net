@@ -7,9 +7,11 @@ set -euo pipefail
 # 2. Auto-register channels for any MCP server declaring claude/channel capability
 #    (no --channels or --dangerously-load-development-channels flag needed)
 # 3. Bypass org policy channelsEnabled check
+# 4. Enable --dangerously-skip-permissions regardless of org/Statsig gates
 #
 # Usage:
 #   claude-channels [claude args...]
+#   claude-channels --dangerously-skip-permissions
 #
 # The original binary is never modified. A patched copy is cached at
 # ~/.local/share/claude-channels/ and regenerated when the source updates.
@@ -136,6 +138,26 @@ apply_patches() {
     else
         echo "  Patch 3: Permission prompt bypass — $prompt_count match(es)" >&2
         sed -i 's/{return!!(E8("userSettings")?.skipDangerousModePermissionPrompt/{return!0;return!!(E8("userSettings")?.skipDangerousModePermissionPrompt/g' "$dst"
+    fi
+
+    # ── Patch 4: Bypass permissions mode gate ───────────────────────────
+    #
+    # The tengu_disable_bypass_permissions_mode Statsig gate blocks
+    # --dangerously-skip-permissions on some accounts/orgs. Patching the
+    # gate wrapper to return false (not disabled) allows bypass mode.
+    #
+    # Original:  function X(){return Y("tengu_disable_bypass_permissions_mode")}
+    # Patched:   function X(){return!1;return Y("tengu_disable_bypass_permissions_mode")}
+
+    local bypass_pattern='\{return [a-zA-Z0-9_$]+\("tengu_disable_bypass_permissions_mode"\)\}'
+    local bypass_count
+    bypass_count=$(grep -cP "$bypass_pattern" "$dst" || true)
+
+    if [ "$bypass_count" -eq 0 ]; then
+        echo "  Patch 4: Bypass permissions gate — pattern not found" >&2
+    else
+        echo "  Patch 4: Bypass permissions gate — $bypass_count match(es)" >&2
+        sed -i -E 's/\{return ([a-zA-Z0-9_$]+)\("tengu_disable_bypass_permissions_mode"\)\}/\{return!1;return \1("tengu_disable_bypass_permissions_mode")\}/g' "$dst"
     fi
 
     # ── Verify ───────────────────────────────────────────────────────────
