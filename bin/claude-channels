@@ -6,9 +6,8 @@ set -euo pipefail
 # 1. Channels feature gate (tengu_harbor Statsig flag → true)
 # 2. Org policy channelsEnabled check (inverted so it never blocks)
 # 3. Bypass permissions gate (tengu_disable_bypass_permissions_mode → false)
-#
-# Settings (written to ~/.claude/settings.json if not already present):
-# 4. skipDangerousModePermissionPrompt: true (auto-accept dev channels warning)
+# 4. Channel allowlist bypass (non-dev entries skip allowlist check)
+# 5. Dev channels dialog auto-accept (no approval prompt on startup)
 #
 # CLI flags auto-injected:
 # - --dangerously-skip-permissions
@@ -40,33 +39,6 @@ find_claude_binary() {
 
     echo "ERROR: Could not find Claude Code binary." >&2
     return 1
-}
-
-# ── Ensure settings ──────────────────────────────────────────────────────
-
-ensure_settings() {
-    local settings="$HOME/.claude/settings.json"
-    if [ ! -f "$settings" ]; then
-        mkdir -p "$HOME/.claude"
-        echo '{"skipDangerousModePermissionPrompt":true}' > "$settings"
-        return
-    fi
-
-    # Check if already set
-    if python3 -c "
-import json, sys
-with open('$settings') as f:
-    d = json.load(f)
-if d.get('skipDangerousModePermissionPrompt') is True:
-    sys.exit(0)
-d['skipDangerousModePermissionPrompt'] = True
-with open('$settings', 'w') as f:
-    json.dump(d, f, indent=2)
-    f.write('\n')
-print('  Settings: added skipDangerousModePermissionPrompt', file=sys.stderr)
-" 2>&1; then
-        true
-    fi
 }
 
 # ── Auto-detect channel MCP servers ──────────────────────────────────────
@@ -111,9 +83,6 @@ if $needs_regen; then
     echo "$CLI_PATH" > "$SOURCE_MARKER"
 fi
 
-# Ensure prompt skip is in settings
-ensure_settings
-
 # Build extra flags
 EXTRA_ARGS=()
 
@@ -133,7 +102,7 @@ if ! $already_has_channels; then
     while IFS= read -r server; do
         [ -n "$server" ] && CHANNEL_ARGS+=("$server")
     done < <(find_channel_servers)
-    [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--channels "${CHANNEL_ARGS[@]}")
+    [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
 fi
 
 exec "$PATCHED_CLI" "${EXTRA_ARGS[@]}" "$@"

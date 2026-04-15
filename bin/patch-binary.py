@@ -58,6 +58,23 @@ def apply_patches(data: bytes) -> tuple[bytes, list[str]]:
     else:
         log.append("  Patch 4: Channel allowlist — pattern not found")
 
+    # ── Patch 5: Dev channels dialog auto-accept ──────────────────
+    # The DevChannelsDialog is shown when authenticated and dev channels
+    # are present. The condition: if(!X()||!Y()?.accessToken) auto-accepts
+    # when NOT authenticated; else shows the dialog. Remove the ! before
+    # the accessToken check so it always enters the auto-accept branch.
+    # Stable anchor: ||!<func>()?.accessToken)Ai([ — unique to this code path.
+    pat5 = rb"\|\|![a-zA-Z0-9_$]+\(\)\?\.accessToken\)Ai\(\["
+    matches5 = list(re.finditer(pat5, data))
+    if matches5:
+        log.append(f"  Patch 5: Dev channels dialog bypass — {len(matches5)} match(es)")
+        for m in reversed(matches5):
+            orig = m.group(0)
+            repl = orig.replace(b"||!", b"|| ", 1)
+            data = data[: m.start()] + repl + data[m.end() :]
+    else:
+        log.append("  Patch 5: Dev channels dialog — pattern not found")
+
     if len(data) != orig_len:
         log.append(f"  FATAL: size changed ({orig_len} → {len(data)})")
         return data, log
