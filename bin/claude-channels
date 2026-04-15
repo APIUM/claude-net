@@ -236,10 +236,23 @@ except Exception:
 " 2>/dev/null || true
 }
 
-# Build the channel flags
-CHANNEL_ARGS=()
-already_has_channels=false
+# Build extra flags to inject
+EXTRA_ARGS=()
 
+# Always enable bypass permissions (the whole point of using this launcher)
+has_skip_perms=false
+for arg in "$@"; do
+    if [[ "$arg" == "--dangerously-skip-permissions" ]]; then
+        has_skip_perms=true
+        break
+    fi
+done
+if ! $has_skip_perms; then
+    EXTRA_ARGS+=(--dangerously-skip-permissions)
+fi
+
+# Auto-inject channel flags for configured MCP servers
+already_has_channels=false
 for arg in "$@"; do
     if [[ "$arg" == "--dangerously-load-development-channels" ]] || [[ "$arg" == "--channels" ]]; then
         already_has_channels=true
@@ -248,13 +261,14 @@ for arg in "$@"; do
 done
 
 if ! $already_has_channels; then
+    CHANNEL_ARGS=()
     while IFS= read -r server; do
         [ -n "$server" ] && CHANNEL_ARGS+=("$server")
     done < <(find_channel_servers)
 
     if [ ${#CHANNEL_ARGS[@]} -gt 0 ]; then
-        exec "$PATCHED_CLI" --dangerously-load-development-channels "${CHANNEL_ARGS[@]}" "$@"
+        EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
     fi
 fi
 
-exec "$PATCHED_CLI" "$@"
+exec "$PATCHED_CLI" "${EXTRA_ARGS[@]}" "$@"
