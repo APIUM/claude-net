@@ -148,68 +148,46 @@ export class Registry {
       return { ok: true, entry };
     }
 
-    let matches: AgentEntry[];
-
-    // Level 2: session:user — match across all hosts
     if (hasColon && !hasAt) {
       const [session, user] = name.split(":");
-      matches = [];
-      for (const entry of this.agents.values()) {
-        if (entry.shortName === session && entry.user === user) {
-          matches.push(entry);
-        }
-      }
-      return this.resolveMatches(name, matches);
+      return this.resolveMatches(
+        name,
+        this.filterAgents((e) => e.shortName === session && e.user === user),
+      );
     }
 
-    // Level 3: user@host — match across all sessions
     if (!hasColon && hasAt) {
       const [user, host] = name.split("@");
-      matches = [];
-      for (const entry of this.agents.values()) {
-        if (entry.user === user && entry.host === host) {
-          matches.push(entry);
-        }
-      }
-      return this.resolveMatches(name, matches);
+      return this.resolveMatches(
+        name,
+        this.filterAgents((e) => e.user === user && e.host === host),
+      );
     }
 
-    // Level 4: plain string — try session, then user, then host
-    matches = [];
+    // Plain string: single pass collecting session, user, and host matches
+    // with priority order (session > user > host)
+    const bySession: AgentEntry[] = [];
+    const byUser: AgentEntry[] = [];
+    const byHost: AgentEntry[] = [];
     for (const entry of this.agents.values()) {
-      if (entry.shortName === name) {
-        matches.push(entry);
-      }
-    }
-    if (matches.length === 1) {
-      // biome-ignore lint/style/noNonNullAssertion: length check guarantees index 0 exists
-      return { ok: true, entry: matches[0]! };
-    }
-    if (matches.length > 1) {
-      return this.ambiguousError(name, matches);
+      if (entry.shortName === name) bySession.push(entry);
+      else if (entry.user === name) byUser.push(entry);
+      else if (entry.host === name) byHost.push(entry);
     }
 
-    // Try user match
-    for (const entry of this.agents.values()) {
-      if (entry.user === name) {
-        matches.push(entry);
-      }
-    }
-    if (matches.length === 1) {
-      // biome-ignore lint/style/noNonNullAssertion: length check guarantees index 0 exists
-      return { ok: true, entry: matches[0]! };
-    }
-    if (matches.length > 1) {
-      return this.ambiguousError(name, matches);
-    }
-
-    // Try host match
-    for (const entry of this.agents.values()) {
-      if (entry.host === name) {
-        matches.push(entry);
-      }
-    }
+    const matches =
+      bySession.length > 0 ? bySession : byUser.length > 0 ? byUser : byHost;
     return this.resolveMatches(name, matches);
+  }
+
+  private filterAgents(
+    predicate: (entry: AgentEntry) => boolean,
+  ): AgentEntry[] {
+    const result: AgentEntry[] = [];
+    for (const entry of this.agents.values()) {
+      if (predicate(entry)) result.push(entry);
+    }
+    return result;
   }
 
   private resolveMatches(
