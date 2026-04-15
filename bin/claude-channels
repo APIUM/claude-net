@@ -127,14 +127,17 @@ apply_patches() {
     fi
 
     # ── Patch 3: Auto-accept development channels warning ────────────
+    # The function that checks skipDangerousModePermissionPrompt across
+    # settings scopes. The settings-reader function name changes between
+    # versions (E8, N1, etc.) so we match any identifier.
     local prompt_count
-    prompt_count=$(grep -cP '\{return!!\(E8\("userSettings"\)\?\.skipDangerousModePermissionPrompt' "$dst" || true)
+    prompt_count=$(grep -cP '\{return!!\([a-zA-Z0-9_$]+\("userSettings"\)\?\.skipDangerousModePermissionPrompt' "$dst" || true)
 
     if [ "$prompt_count" -eq 0 ]; then
         echo "  Patch 3: Permission prompt — pattern not found" >&2
     else
         echo "  Patch 3: Permission prompt bypass — $prompt_count match(es)" >&2
-        sed -i 's/{return!!(E8("userSettings")?.skipDangerousModePermissionPrompt/{return!0;return!!(E8("userSettings")?.skipDangerousModePermissionPrompt/g' "$dst"
+        sed -i -E 's/\{return!!\(([a-zA-Z0-9_$]+)\("userSettings"\)\?\.skipDangerousModePermissionPrompt/\{return!0;return!!(\1("userSettings")?.skipDangerousModePermissionPrompt/g' "$dst"
     fi
 
     # ── Patch 4: Bypass permissions mode gate ────────────────────────
