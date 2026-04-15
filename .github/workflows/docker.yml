@@ -2,9 +2,9 @@ name: Build and push Docker image
 
 on:
   push:
-    branches: [main]
-  release:
-    types: [published]
+    branches: ["**"]
+    tags: ["v*"]
+  delete:
 
 env:
   REGISTRY: ghcr.io
@@ -12,6 +12,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,9 +32,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=
             type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - uses: docker/build-push-action@v6
         with:
@@ -41,3 +43,17 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  cleanup:
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+      - name: Delete branch image tag
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: claude-net
+          package-type: container
+          delete-package-tag: ${{ github.event.ref }}
