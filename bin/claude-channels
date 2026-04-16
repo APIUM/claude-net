@@ -15,7 +15,6 @@ set -euo pipefail
 
 CACHE_DIR="$HOME/.local/share/claude-channels"
 PATCHED_LINK="$CACHE_DIR/claude-patched"
-SOURCE_MARKER="$CACHE_DIR/source_path"
 PATCHER="$(cd "$(dirname "$0")" && pwd)/patch-binary.py"
 
 # ── Find Claude Code binary ──────────────────────────────────────────────
@@ -43,24 +42,21 @@ find_claude_binary() {
 
 find_channel_servers() {
     local config="$HOME/.claude.json"
-    local cwd
-    cwd=$(pwd)
     [ -f "$config" ] || return
 
-    python3 -c "
-import json
+    CLAUDE_JSON="$config" PROJECT_DIR="$(pwd)" python3 -c "
+import json, os
 seen = set()
 try:
-    with open('$config') as f:
+    with open(os.environ['CLAUDE_JSON']) as f:
         d = json.load(f)
-    # User-wide MCP servers
+    cwd = os.environ['PROJECT_DIR']
     for name in d.get('mcpServers', {}).keys():
         if name not in seen:
             seen.add(name)
             print(f'server:{name}')
-    # Project-scoped MCP servers for current directory
     for proj_path, proj in d.get('projects', {}).items():
-        if proj_path == '$cwd':
+        if proj_path == cwd:
             for name in proj.get('mcpServers', {}).keys():
                 if name not in seen:
                     seen.add(name)
@@ -75,17 +71,16 @@ except Exception:
 CLI_PATH=$(find_claude_binary)
 mkdir -p "$CACHE_DIR"
 
-# Determine version and versioned patch path
-VERSION=$("$CLI_PATH" --version 2>/dev/null | head -1 | awk '{print $1}')
-if [ -z "$VERSION" ]; then
-    VERSION="unknown"
-fi
-PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${VERSION}"
+# Version key from binary hash (avoids executing the binary just for --version)
+HASH=$(sha256sum "$CLI_PATH" | head -c 12)
+PATCHED_VERSIONED="$CACHE_DIR/claude-patched-${HASH}"
 
-# Patch if this version hasn't been patched yet
+# Patch if this hash hasn't been patched yet
 if [ ! -f "$PATCHED_VERSIONED" ]; then
     python3 "$PATCHER" "$CLI_PATH" "$PATCHED_VERSIONED"
-    echo "$CLI_PATH" > "$SOURCE_MARKER"
+
+    # Clean up old versioned files (keep only the new one)
+    find "$CACHE_DIR" -name 'claude-patched-*' ! -name "claude-patched-${HASH}" -delete 2>/dev/null || true
 fi
 
 # Symlink to the common name (atomic update, safe even if old version is running)

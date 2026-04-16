@@ -81,7 +81,7 @@ When reverse-engineering a new gate or check:
 | `?.accessToken` (property access pattern) | Exact function signatures |
 | `{action:"skip",kind:"allowlist"` (return value shape) | Line numbers or byte offsets |
 
-## Current patches (verified on v2.1.108 and v2.1.109)
+## Current patches (verified on v2.1.108, v2.1.109, v2.1.110)
 
 Implementation: `bin/patch-binary.py`
 

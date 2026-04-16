@@ -59,8 +59,10 @@ def apply_patches(data: bytes) -> tuple[bytes, list[str]]:
     # are present. The condition: if(!X()||!Y()?.accessToken) auto-accepts
     # when NOT authenticated; else shows the dialog. Remove the ! before
     # the accessToken check so it always enters the auto-accept branch.
-    # Stable anchor: ||!<func>()?.accessToken)Ai([ -- unique to this code path.
-    pat4 = rb"\|\|![a-zA-Z0-9_$]+\(\)\?\.accessToken\)Ai\(\["
+    # Stable anchor: ||!<func>()?.accessToken)<func>([ -- the function name
+    # after accessToken changes per build (Ai in 2.1.108, Wi in 2.1.110) so
+    # we match any identifier there.
+    pat4 = rb"\|\|![a-zA-Z0-9_$]+\(\)\?\.accessToken\)[a-zA-Z0-9_$]+\(\["
     matches4 = list(re.finditer(pat4, data))
     if matches4:
         log.append(f"  Patch 4: Dev channels dialog bypass -- {len(matches4)} match(es)")
@@ -73,10 +75,10 @@ def apply_patches(data: bytes) -> tuple[bytes, list[str]]:
 
     if len(data) != orig_len:
         log.append(f"  FATAL: size changed ({orig_len} -> {len(data)})")
-        return data, log
+        return data, log, False
 
     log.append(f"  Size unchanged ({orig_len} bytes)")
-    return data, log
+    return data, log, True
 
 
 def main():
@@ -89,12 +91,21 @@ def main():
         data = f.read()
 
     print(f"Patching Claude Code binary ({len(data)} bytes)...", file=sys.stderr)
-    patched, log = apply_patches(data)
+    patched, log, ok = apply_patches(data)
     for msg in log:
         print(msg, file=sys.stderr)
 
-    if len(patched) != len(data):
+    if not ok:
         sys.exit(1)
+
+    # Count how many patches actually applied vs found nothing
+    applied = sum(1 for m in log if "match(es)" in m or "replacement(s)" in m)
+    missed = sum(1 for m in log if "not found" in m)
+    if missed:
+        print(
+            f"  WARNING: {missed} patch(es) did not match (version may have changed)",
+            file=sys.stderr,
+        )
 
     with open(dst, "wb") as f:
         f.write(patched)
