@@ -35,6 +35,7 @@ find_claude_binary() {
         echo "$CLAUDE_CLI_PATH"; return 0
     fi
 
+    # Check PATH (may miss ~/.local/bin in non-interactive shells)
     local claude_bin
     claude_bin=$(which claude 2>/dev/null || true)
     if [ -n "$claude_bin" ]; then
@@ -44,6 +45,20 @@ find_claude_binary() {
             echo "$resolved"; return 0
         fi
     fi
+
+    # Common install locations
+    local candidate
+    for candidate in \
+        "$HOME/.local/bin/claude" \
+        "$HOME/.local/share/claude/versions/"*; do
+        if [ -f "$candidate" ]; then
+            local resolved
+            resolved=$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")
+            if [ -f "$resolved" ]; then
+                echo "$resolved"; return 0
+            fi
+        fi
+    done
 
     echo "ERROR: Could not find Claude Code binary." >&2
     return 1
