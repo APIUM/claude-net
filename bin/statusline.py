@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, sys, io, os, socket, re, glob, time
+import json, shutil, sys, io, os, socket, re, glob, time
 
 if os.environ.get("VSCODE_PID"):
     sys.exit(0)
@@ -162,20 +162,38 @@ RED = "\033[31m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 
-# ── Build output ────────────────────────────────────────────────────────
+# ── Build fields ────────────────────────────────────────────────────────
+# Each field is (display_text, visible_length) where display_text includes
+# ANSI codes and visible_length is the printable character count.
+
+ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def vlen(s):
+    """Visible length of a string (strip ANSI escape codes, count emoji as 2)."""
+    clean = ANSI_RE.sub("", s)
+    length = 0
+    for ch in clean:
+        cp = ord(ch)
+        # Emoji and wide chars take 2 columns
+        if cp > 0xFFFF or (0x1F300 <= cp <= 0x1FAFF) or (0x2600 <= cp <= 0x27BF):
+            length += 2
+        else:
+            length += 1
+    return length
+
 
 used_str = fmt_tokens(current_tokens)
 total_str = fmt_tokens(window_size)
 model = short_model(model_name)
 ctx_clock = clock_emoji(ctx_pct)
 
-parts = []
-parts.append(f"{GREEN}{hostname}{RESET}")
-parts.append(f": {CYAN}{dirname}{RESET}")
+fields = []
+fields.append(f"{GREEN}{hostname}{RESET}: {CYAN}{dirname}{RESET}")
 if session_label:
-    parts.append(f" ({session_label})")
-parts.append(f" [{MAGENTA}{model}{RESET}]")
-parts.append(f" {ctx_clock} {used_str}/{total_str}")
+    fields.append(f"({session_label})")
+fields.append(f"[{MAGENTA}{model}{RESET}]")
+fields.append(f"{ctx_clock} {used_str}/{total_str}")
 
 # Rate-limit section (only if data present)
 if rl_pct is not None:
@@ -188,7 +206,7 @@ if rl_pct is not None:
         rl_color = YELLOW
     else:
         rl_color = DIM
-    parts.append(f" {rl_clock} {rl_color}5h:{rl_int}%{reset_str}{RESET}")
+    fields.append(f"{rl_clock} {rl_color}5h:{rl_int}%{reset_str}{RESET}")
 
 # claude-net section (only if state file exists)
 cn_state = read_claude_net_state(project_dir)
@@ -197,10 +215,38 @@ if cn_state:
     name = cn_state.get("name", "")
     short_name = name.split("@")[0] if name else ""
     if status == "online" and short_name:
-        parts.append(f" {GREEN}{short_name}●{RESET}")
+        fields.append(f"{GREEN}{short_name}●{RESET}")
     elif status == "error":
-        parts.append(f" {RED}!clash{RESET}")
+        fields.append(f"{RED}!clash{RESET}")
     elif status == "disconnected" and short_name:
-        parts.append(f" {YELLOW}{short_name}○{RESET}")
+        fields.append(f"{YELLOW}{short_name}○{RESET}")
 
-print("".join(parts))
+# ── Layout: wrap fields to fit terminal width ───────────────────────────
+# Terminal width from COLUMNS env (set by some terminals), or fallback.
+# shutil.get_terminal_size checks COLUMNS env, then ioctl, then fallback.
+term_cols = shutil.get_terminal_size(fallback=(0, 0)).columns
+
+if term_cols <= 0:
+    # No width info — output single line, no wrapping
+    print(" ".join(fields))
+else:
+    lines = []
+    current_line = ""
+    current_len = 0
+    for field in fields:
+        flen = vlen(field)
+        needed = flen + (1 if current_len > 0 else 0)  # space separator
+        if current_len > 0 and current_len + needed > term_cols:
+            lines.append(current_line)
+            current_line = field
+            current_len = flen
+        else:
+            if current_len > 0:
+                current_line += " " + field
+                current_len += 1 + flen
+            else:
+                current_line = field
+                current_len = flen
+    if current_line:
+        lines.append(current_line)
+    print("\n".join(lines))
