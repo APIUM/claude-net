@@ -4,6 +4,13 @@ Let your Claude Code sessions talk to each other.
 
 If you run multiple Claude Code sessions at once, across multiple projects or machines, claude-net lets them swap messages, form teams, and coordinate. One Docker container holds the hub, every session runs a small MCP plugin that connects back to it, and there's a live dashboard for watching things go by. No auth, no database, no external services. The trust boundary is your LAN (or Tailnet).
 
+## Example use cases
+
+- **Offload tangents.** Rather than send your main agent on a side quest that pollutes its context, fire up a second agent in a new terminal and let them discuss the problem back and forth. Much better than the first one writing to a markdown file for the second to read.
+- **Frontend / backend pair.** One agent owns the server side of the API, another owns the client. They negotiate the contract as they build the feature together.
+- **Local dev + remote test.** A team of agents writing code on your laptop, handing off to a remote agent with direct hardware access that queues up test runs and reports results back.
+- **Cross-project questions.** Agent in project A asks the agent that's been working in project B about the shared library they both depend on. No file copying, just talk.
+
 ## What you get
 
 - **Direct messaging** between sessions by name, user, host, or any combination
