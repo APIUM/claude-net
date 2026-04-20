@@ -1667,7 +1667,20 @@
         result: function(p, el) {
           if (p.is_error) setStatusError(el);
           else setStatusOk(el, 'done');
-          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          // Grep responses arrive as { content: "..." } (output_mode "content")
+          // or { filenames: [...] } / raw string. Pull the usable text out
+          // before we try to parse it.
+          var resp;
+          if (typeof p.response === 'string') {
+            resp = p.response;
+          } else if (p.response && typeof p.response === 'object') {
+            if (typeof p.response.content === 'string') resp = p.response.content;
+            else if (Array.isArray(p.response.content)) resp = p.response.content.join('\n');
+            else if (Array.isArray(p.response.filenames)) resp = p.response.filenames.join('\n');
+            else resp = tryJson(p.response);
+          } else {
+            resp = String(p.response || '');
+          }
           var rawLines = (resp || '').split('\n').filter(function(l) { return l.length > 0; });
           // Grep output comes as either "N:content" (single-file path) or
           // "file:N:content" (multi-file). Detect mode so single-file results
@@ -1678,6 +1691,7 @@
           var fileOrder = [];
           var singleFileMode = rawLines.length > 0 && rawLines.every(function(l) { return contentRx.test(l); });
           var matchCount = 0;
+          var filenameMode = false;
           if (singleFileMode) {
             for (var i = 0; i < rawLines.length; i++) {
               var m = rawLines[i].match(contentRx);
@@ -1695,12 +1709,26 @@
               if (!files[f]) { files[f] = []; fileOrder.push(f); }
               files[f].push({ line: mm[2], text: mm[3] });
             }
+            // files_with_matches mode: response is a plain list of file paths.
+            if (matchCount === 0 && rawLines.length > 0) {
+              filenameMode = true;
+              matchCount = rawLines.length;
+              for (var q = 0; q < rawLines.length; q++) {
+                fileOrder.push(rawLines[q]);
+                files[rawLines[q]] = [];
+              }
+            }
           }
           var fileCount = singleFileMode ? 1 : fileOrder.length;
-          var summary = matchCount === 0
-            ? 'No matches'
-            : 'Found ' + matchCount + ' ' + (matchCount === 1 ? 'line' : 'lines') +
+          var summary;
+          if (matchCount === 0) {
+            summary = 'No matches';
+          } else if (filenameMode) {
+            summary = 'Found ' + matchCount + ' ' + (matchCount === 1 ? 'file' : 'files');
+          } else {
+            summary = 'Found ' + matchCount + ' ' + (matchCount === 1 ? 'line' : 'lines') +
               (fileCount > 1 ? ' across ' + fileCount + ' files' : '');
+          }
           var body = '<div class="m-grep">';
           var MAX_LINES = 40;
           var shown = 0, clipped = false;
