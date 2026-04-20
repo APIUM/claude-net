@@ -65,7 +65,7 @@ describe("TmuxInjector", () => {
 
   test("rejects too-long prompt", async () => {
     const inj = new TmuxInjector({ tmuxBin: fakeTmux });
-    const big = "x".repeat(64 * 1024);
+    const big = "x".repeat(1024 * 1024);
     const r = await inj.inject("s-1", "%0", big);
     expect(r.ok).toBe(false);
     if (r.ok) return;

@@ -14,7 +14,11 @@
 
 import { spawn } from "node:child_process";
 
-export const MAX_PROMPT_BYTES = 32 * 1024;
+export const MAX_PROMPT_BYTES = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_INJECT_MAX_KB);
+  const kb = Number.isFinite(raw) && raw > 0 ? raw : 512;
+  return kb * 1024;
+})();
 export const RATE_LIMIT_MS = 250;
 const SEND_KEYS_TIMEOUT_MS = 2_000;
 

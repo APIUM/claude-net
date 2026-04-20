@@ -795,7 +795,11 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
 
 // ── Inject limits & helpers ───────────────────────────────────────────────
 
-const MAX_INJECT_BYTES = 32 * 1024;
+const MAX_INJECT_BYTES = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_INJECT_MAX_KB);
+  const kb = Number.isFinite(raw) && raw > 0 ? raw : 512;
+  return kb * 1024;
+})();
 
 const INJECT_RPM = (() => {
   const raw = Number(process.env.CLAUDE_NET_MIRROR_INJECT_RPM);
