@@ -537,6 +537,40 @@
   .m-todo li.completed .m-todo-text { text-decoration: line-through; opacity: 0.6; }
   .m-todo li.in_progress .m-todo-text { color: var(--yellow); font-weight: 500; }
   .m-todo .m-todo-text { flex: 1; word-break: break-word; }
+
+  /* Claude Code task list (Task* tool family) — mirrors TaskListV2 in the CLI */
+  .m-task-list-block { margin-top: 6px; }
+  .m-task-line {
+    display: flex; align-items: flex-start; gap: 8px;
+    font-size: 12.5px; line-height: 1.4; padding: 2px 0;
+  }
+  .m-task-glyph {
+    flex-shrink: 0; width: 16px; text-align: center;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 13px; line-height: 1.2;
+  }
+  .m-task-subject { flex: 1; word-break: break-word; }
+  .m-task-line.m-task-pending .m-task-glyph { color: var(--text-muted); }
+  .m-task-line.m-task-pending .m-task-subject { color: var(--text); }
+  .m-task-line.m-task-in_progress .m-task-glyph { color: var(--orange); }
+  .m-task-line.m-task-in_progress .m-task-subject { color: var(--text); font-weight: 600; }
+  .m-task-line.m-task-completed .m-task-glyph { color: var(--green); }
+  .m-task-line.m-task-completed .m-task-subject {
+    color: var(--text-muted); text-decoration: line-through; opacity: 0.85;
+  }
+  .m-task-line.m-task-deleted .m-task-glyph { color: var(--red); }
+  .m-task-line.m-task-deleted .m-task-subject {
+    color: var(--text-dim); text-decoration: line-through;
+  }
+  .m-task-activity {
+    font-size: 11.5px; color: var(--text-muted); padding-left: 24px;
+    font-style: italic; margin-top: 1px;
+  }
+  .m-task-summary {
+    font-size: 11px; color: var(--text-muted); margin-top: 8px;
+    padding-top: 4px; border-top: 1px dashed var(--border);
+  }
+  .m-task-summary strong { color: var(--text); font-weight: 600; }
 </style>
 <script src="/bin/marked.umd.min.js"></script>
 <script src="/bin/purify.min.js"></script>
@@ -1045,6 +1079,15 @@
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
 
+    // ── Task* tool state (tracks Claude Code's harness task list) ────
+    // Mirrors the state that TaskListV2 in the real CLI tracks: id →
+    // {subject, activeForm, description, status}. Populated from
+    // TaskCreate/TaskUpdate/TaskList/TaskGet payloads; used so that
+    // TaskUpdate cards can show the task's subject (which lives only on
+    // the TaskCreate call) instead of just the id.
+    var taskState = new Map();
+    var pendingTaskCreates = new Map(); // tool_use_id → {subject, ...}
+
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
       userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
@@ -1114,6 +1157,110 @@
       if (lines.length <= maxLines) return text;
       return lines.slice(0, maxLines).join('\n') +
         '\n… (' + (lines.length - maxLines) + ' more lines)';
+    }
+
+    // ── Task* helpers ───────────────────────────────────────────────
+
+    var TASK_STATUS_GLYPHS = {
+      pending: '◻',
+      in_progress: '◼',
+      completed: '✔',
+      deleted: '×',
+    };
+
+    function taskUpsert(id, partial) {
+      if (!id) return null;
+      var key = String(id);
+      var cur = taskState.get(key) || {};
+      var merged = Object.assign({}, cur, partial);
+      taskState.set(key, merged);
+      return merged;
+    }
+
+    function taskSummaryLine() {
+      var total = 0, pending = 0, inProg = 0, done = 0;
+      taskState.forEach(function(t) {
+        if (t.status === 'deleted') return;
+        total++;
+        if (t.status === 'completed') done++;
+        else if (t.status === 'in_progress') inProg++;
+        else pending++;
+      });
+      if (total === 0) return '';
+      var parts = [done + ' done'];
+      if (inProg > 0) parts.push(inProg + ' in progress');
+      parts.push(pending + ' open');
+      return total + ' task' + (total === 1 ? '' : 's') +
+        ' (' + parts.join(', ') + ')';
+    }
+
+    function renderTaskLine(id, task) {
+      if (!task) return '';
+      var status = task.status || 'pending';
+      var glyph = TASK_STATUS_GLYPHS[status] || TASK_STATUS_GLYPHS.pending;
+      var title = task.subject || ('Task ' + id);
+      var activity = status === 'in_progress' && task.activeForm
+        ? task.activeForm
+        : null;
+      var html =
+        '<div class="m-task-line m-task-' + escapeAttr(status) + '">' +
+          '<span class="m-task-glyph">' + glyph + '</span>' +
+          '<span class="m-task-subject">' + escapeHtml(title) + '</span>' +
+        '</div>';
+      if (activity) {
+        html += '<div class="m-task-activity">' + escapeHtml(activity) + '…</div>';
+      }
+      return html;
+    }
+
+    function renderTaskListBlock(ids) {
+      // Render given ids (or all tracked tasks if ids is null) as a checkbox
+      // list. Sorted by id numerically when possible.
+      var keys = ids || [...taskState.keys()];
+      keys.sort(function(a, b) {
+        var na = Number(a), nb = Number(b);
+        if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+        return String(a).localeCompare(String(b));
+      });
+      var out = '';
+      for (var i = 0; i < keys.length; i++) {
+        var t = taskState.get(keys[i]);
+        if (t && t.status !== 'deleted') out += renderTaskLine(keys[i], t);
+      }
+      return out;
+    }
+
+    /** Best-effort parse of a TaskList tool_response into task records. */
+    function parseTaskListResponse(resp) {
+      if (!resp) return null;
+      if (typeof resp === 'object' && !Array.isArray(resp)) {
+        if (Array.isArray(resp.tasks)) return resp.tasks;
+        if (resp.id && resp.subject) return [resp];
+      }
+      if (Array.isArray(resp)) return resp;
+      if (typeof resp === 'string') {
+        // Try JSON first
+        var trimmed = resp.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          try {
+            var parsed = JSON.parse(trimmed);
+            return parseTaskListResponse(parsed);
+          } catch (e) { /* fall through */ }
+        }
+      }
+      return null;
+    }
+
+    /** Best-effort parse of a TaskCreate tool_response for the new taskId. */
+    function parseCreatedTaskId(resp) {
+      if (!resp) return null;
+      if (typeof resp === 'object' && resp !== null) {
+        return resp.taskId || resp.id || null;
+      }
+      var s = String(resp);
+      var m = s.match(/[Tt]ask\s*#?(\d+)/);
+      if (m) return m[1];
+      return null;
     }
 
     var TOOL_RENDERERS = {
@@ -1272,6 +1419,187 @@
         },
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'saved');
+        },
+      },
+
+      // ── Claude Code task list (Task* family) ─────────────────────
+      //
+      // Each renderer maintains `taskState` so TaskUpdate cards can show
+      // the subject (which lives on the earlier TaskCreate) plus a live
+      // checkbox line matching the CLI's TaskListV2 rendering.
+
+      TaskCreate: {
+        call: function(p, el) {
+          var subject = (p.input && p.input.subject) || '';
+          var activeForm = p.input && p.input.activeForm;
+          var description = p.input && p.input.description;
+          // Stash by tool_use_id so we can attach the id when the result lands.
+          if (p.tool_use_id) {
+            pendingTaskCreates.set(p.tool_use_id, {
+              subject: subject,
+              activeForm: activeForm,
+              description: description,
+              status: 'pending',
+            });
+          }
+          el.innerHTML = makeHeadline('TaskCreate', '➕ ' + escapeHtml(subject));
+          if (description) el.querySelector('.m-tool-sub') ||
+            el.insertAdjacentHTML(
+              'beforeend',
+              '<div class="m-tool-sub">' + escapeHtml(description) + '</div>',
+            );
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); return; }
+          setStatusOk(el, 'created');
+          var id = parseCreatedTaskId(p.response);
+          if (id) {
+            var pend = pendingTaskCreates.get(p.tool_use_id);
+            if (pend) {
+              taskUpsert(id, pend);
+              pendingTaskCreates.delete(p.tool_use_id);
+            }
+            var line = renderTaskLine(id, taskState.get(String(id)));
+            var summary = taskSummaryLine();
+            el.insertAdjacentHTML(
+              'beforeend',
+              '<div class="m-task-list-block">' + line + '</div>' +
+                (summary ? '<div class="m-task-summary">' + escapeHtml(summary) + '</div>' : ''),
+            );
+          }
+        },
+      },
+
+      TaskUpdate: {
+        call: function(p, el) {
+          var input = p.input || {};
+          var id = input.taskId;
+          if (!id) {
+            el.innerHTML = makeHeadline('TaskUpdate', '⟳ (missing taskId)');
+            return;
+          }
+          var patch = {};
+          if (input.status) patch.status = input.status;
+          if (input.subject) patch.subject = input.subject;
+          if (input.activeForm) patch.activeForm = input.activeForm;
+          if (input.description) patch.description = input.description;
+          var task = taskUpsert(id, patch);
+          var glyph = TASK_STATUS_GLYPHS[task.status] || TASK_STATUS_GLYPHS.pending;
+          el.innerHTML = makeHeadline(
+            'TaskUpdate',
+            glyph + ' task ' + escapeHtml(String(id)) +
+              (input.status ? ' → ' + escapeHtml(input.status) : ''),
+          );
+          var line = renderTaskLine(id, task);
+          var summary = taskSummaryLine();
+          el.insertAdjacentHTML(
+            'beforeend',
+            '<div class="m-task-list-block">' + line + '</div>' +
+              (summary ? '<div class="m-task-summary">' + escapeHtml(summary) + '</div>' : ''),
+          );
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'updated');
+        },
+      },
+
+      TaskList: {
+        call: function(p, el) {
+          el.innerHTML = makeHeadline('TaskList', '📋 list tasks');
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); return; }
+          setStatusOk(el, 'listed');
+          var tasks = parseTaskListResponse(p.response);
+          if (Array.isArray(tasks) && tasks.length > 0) {
+            // Sync state from the authoritative list.
+            for (var i = 0; i < tasks.length; i++) {
+              var t = tasks[i];
+              var id = t.id || t.taskId;
+              if (!id) continue;
+              taskUpsert(id, {
+                subject: t.subject,
+                activeForm: t.activeForm,
+                description: t.description,
+                status: t.status || 'pending',
+              });
+            }
+          }
+          var listHtml = renderTaskListBlock(
+            Array.isArray(tasks)
+              ? tasks.map(function(t) { return String(t.id || t.taskId); }).filter(Boolean)
+              : null,
+          );
+          var summary = taskSummaryLine();
+          if (!listHtml && !summary) {
+            // Fallback — show raw response so the user isn't left blank.
+            appendDetails(el, 'response (raw)',
+              '<pre>' + escapeHtml(typeof p.response === 'string'
+                ? p.response
+                : tryJson(p.response)) + '</pre>');
+            return;
+          }
+          el.insertAdjacentHTML(
+            'beforeend',
+            (summary ? '<div class="m-task-summary">' + escapeHtml(summary) + '</div>' : '') +
+              '<div class="m-task-list-block">' + listHtml + '</div>',
+          );
+        },
+      },
+
+      TaskGet: {
+        call: function(p, el) {
+          var id = (p.input && p.input.taskId) || '?';
+          el.innerHTML = makeHeadline('TaskGet', '👁 task ' + escapeHtml(String(id)));
+        },
+        result: function(p, el) {
+          if (p.is_error) { setStatusError(el); return; }
+          setStatusOk(el, 'read');
+          var tasks = parseTaskListResponse(p.response);
+          var single = Array.isArray(tasks) && tasks.length > 0 ? tasks[0] : null;
+          if (single) {
+            var id = single.id || single.taskId;
+            if (id) {
+              taskUpsert(id, {
+                subject: single.subject,
+                activeForm: single.activeForm,
+                description: single.description,
+                status: single.status,
+              });
+              var line = renderTaskLine(id, taskState.get(String(id)));
+              el.insertAdjacentHTML('beforeend',
+                '<div class="m-task-list-block">' + line + '</div>');
+              return;
+            }
+          }
+          appendDetails(el, 'response',
+            '<pre>' + escapeHtml(typeof p.response === 'string'
+              ? p.response
+              : tryJson(p.response)) + '</pre>');
+        },
+      },
+
+      // Background-shell / agent tooling — not the task list, but keep the
+      // output compact instead of dumping raw JSON.
+      TaskOutput: {
+        call: function(p, el) {
+          var id = p.input && p.input.task_id;
+          el.innerHTML = makeHeadline('TaskOutput', '📤 bg task ' + escapeHtml(String(id || '?')));
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'read');
+          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
+          appendDetails(el, 'output',
+            '<pre>' + escapeHtml(truncateLines(resp, 20)) + '</pre>', { open: true });
+        },
+      },
+      TaskStop: {
+        call: function(p, el) {
+          var id = (p.input && (p.input.task_id || p.input.shell_id)) || '?';
+          el.innerHTML = makeHeadline('TaskStop', '⏹ stop bg task ' + escapeHtml(String(id)));
+        },
+        result: function(p, el) {
+          if (p.is_error) setStatusError(el); else setStatusOk(el, 'stopped');
         },
       },
     };
