@@ -93,15 +93,19 @@ Available tools:
 - list_teams() — list all teams with members
 
 IDENTITY AND REGISTRATION:
-On startup the plugin tries to auto-register as session:user@host.
-This can silently fail if another session in the same folder on this host
-already claimed that name.
+On startup the plugin auto-registers as session:user@host. If that
+default name is taken (e.g. a second Claude Code session opened in the
+same folder — fork-session), the plugin automatically picks a distinct
+suffix: session-2:user@host, session-3:user@host, and so on up to -9.
+So concurrent sessions in one folder each get a visible unique identity
+without user input.
 
 The FIRST time the user asks you to do anything with claude-net
-(send a message, list agents, join a team, etc.) you MUST first call
-whoami() to confirm your identity. If whoami returns an error saying
-you are not registered, ask the user to pick a name. If you have the
-AskUserQuestion tool available, use it:
+(send a message, list agents, join a team, etc.) call whoami() to
+confirm your identity. Only if whoami returns an error saying you are
+not registered (very rare — every default and -2…-9 suffix was taken)
+should you ask the user to pick a name. If you have the AskUserQuestion
+tool available, use it:
   AskUserQuestion({ questions: [{ question: "Pick a claude-net agent name for this session (default was taken):",
     options: [{ label: "<session_name>", description: "Use the session name" }] }] })
 (Users can always choose "Other" for free-text input.)
@@ -140,6 +144,18 @@ export function buildDefaultName(): string {
   const user = process.env.USER || os.userInfo().username;
   const host = os.hostname();
   return `${session}:${user}@${host}`;
+}
+
+/**
+ * Insert a `-N` suffix into the session portion of a `session:user@host`
+ * name. Used when the default name collides — e.g. a second Claude Code
+ * session opened in the same folder (fork-session) — so each session ends
+ * up with a distinct, visible identity.
+ */
+export function withSessionSuffix(fullName: string, n: number): string {
+  const colon = fullName.indexOf(":");
+  if (colon === -1) return `${fullName}-${n}`;
+  return `${fullName.slice(0, colon)}-${n}${fullName.slice(colon)}`;
 }
 
 export function createChannelNotification(message: InboundMessageFrame): {
@@ -341,6 +357,54 @@ function handleHubFrame(raw: string): void {
   }
 }
 
+const MAX_AUTO_REGISTER_ATTEMPTS = 9; // tries base, base-2, …, base-9
+
+async function autoRegisterWithRetry(baseName: string): Promise<void> {
+  for (let attempt = 0; attempt < MAX_AUTO_REGISTER_ATTEMPTS; attempt++) {
+    const candidate =
+      attempt === 0 ? baseName : withSessionSuffix(baseName, attempt + 1);
+    try {
+      await request({ action: "register", name: candidate });
+      storedName = candidate;
+      registeredName = candidate;
+      log(
+        attempt === 0
+          ? `Auto-registered as ${candidate}`
+          : `Auto-registered as ${candidate} (base "${baseName}" was taken)`,
+      );
+      writeSessionState({
+        name: candidate,
+        status: "online",
+        hub: hubWsUrl,
+        cwd: process.cwd(),
+      });
+      request({ action: "ping" }).catch(() => {});
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const isCollision = /already registered/i.test(message);
+      if (!isCollision || attempt === MAX_AUTO_REGISTER_ATTEMPTS - 1) {
+        registeredName = "";
+        log(
+          `Auto-registration failed after ${attempt + 1} attempt(s): ${message}`,
+        );
+        writeSessionState({
+          name: "",
+          status: "error",
+          error: message,
+          hub: hubWsUrl,
+          cwd: process.cwd(),
+        });
+        emitSystemNotification(
+          `claude-net: could not auto-register (tried ${candidate} and earlier suffixes; last error: ${message}). Ask the user what name to use for this session, then call the register tool with their chosen name before using any messaging tools.`,
+        );
+        return;
+      }
+      log(`Name "${candidate}" taken; trying next suffix`);
+    }
+  }
+}
+
 function connectWebSocket(): void {
   if (!hubWsUrl) return;
 
@@ -351,38 +415,14 @@ function connectWebSocket(): void {
     log("Connected to hub");
     reconnectDelay = RECONNECT_INITIAL_MS;
 
-    // Auto-register with stored name
+    // Auto-register with stored name. If the default name is taken — a
+    // common case when the user opens a second Claude Code session in the
+    // same folder (fork-session) — we retry with `-2`, `-3`, … suffixes so
+    // each session picks a distinct, visible identity without user input.
     if (storedName) {
-      request({ action: "register", name: storedName })
-        .then(() => {
-          registeredName = storedName;
-          log(`Auto-registered as ${storedName}`);
-          writeSessionState({
-            name: storedName,
-            status: "online",
-            hub: hubWsUrl,
-            cwd: process.cwd(),
-          });
-          // Startup ping: hub echoes back as a channel notification.
-          // If channels are active, Claude sees a <channel> tag confirming the round-trip.
-          // If not, the notification is silently dropped.
-          request({ action: "ping" }).catch(() => {});
-        })
-        .catch((err: unknown) => {
-          registeredName = "";
-          const message = err instanceof Error ? err.message : String(err);
-          log(`Auto-registration failed: ${message}`);
-          writeSessionState({
-            name: "",
-            status: "error",
-            error: message,
-            hub: hubWsUrl,
-            cwd: process.cwd(),
-          });
-          emitSystemNotification(
-            `claude-net: the default name "${storedName}" is already taken (${message}). Ask the user what name to use for this session, then call the register tool with their chosen name before using any messaging tools. Do not pick a name on behalf of the user.`,
-          );
-        });
+      autoRegisterWithRetry(storedName).catch(() => {
+        // Already handled (notification + state write) inside the helper.
+      });
     }
   });
 
