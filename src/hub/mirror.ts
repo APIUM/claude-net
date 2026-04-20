@@ -5,6 +5,7 @@ import type {
   MirrorEventBroadcastEvent,
   MirrorEventFrame,
   MirrorInjectFrame,
+  MirrorPasteFrame,
   MirrorSessionSummary,
   MirrorTokenType,
 } from "@/shared/types";
@@ -70,12 +71,20 @@ export interface MirrorRegistryOptions {
 
 // ── MirrorRegistry ────────────────────────────────────────────────────────
 
+interface PendingPaste {
+  resolve: (path: string) => void;
+  reject: (error: { status: number; message: string }) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class MirrorRegistry {
   readonly sessions = new Map<string, MirrorSessionEntry>();
   private transcriptRing: number;
   private retentionMs: number;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
   readonly store: MirrorStore;
+  /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
+  private pendingPastes = new Map<string, PendingPaste>();
 
   constructor(options?: MirrorRegistryOptions) {
     this.transcriptRing = options?.transcriptRing ?? DEFAULT_TRANSCRIPT_RING;
@@ -510,6 +519,119 @@ export class MirrorRegistry {
     }
     return { ok: true, seq };
   }
+
+  /**
+   * Stash a blob too large for tmux inject as a file on the agent's host.
+   * Sends a MirrorPasteFrame and awaits the agent's MirrorPasteDoneFrame
+   * reply. Resolves with the path the agent wrote, or rejects with a
+   * status-bearing error for the HTTP endpoint to surface.
+   */
+  relayPaste(
+    sid: string,
+    text: string,
+    watcher: string,
+    timeoutMs: number,
+  ): Promise<
+    { ok: true; path: string } | { ok: false; error: string; status: number }
+  > {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return Promise.resolve({
+        ok: false,
+        error: `Session '${sid}' not found.`,
+        status: 404,
+      });
+    if (entry.closedAt)
+      return Promise.resolve({
+        ok: false,
+        error: "Session is closed.",
+        status: 409,
+      });
+    if (!entry.agent)
+      return Promise.resolve({
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      });
+
+    const requestId = crypto.randomUUID();
+    const key = `${sid}:${requestId}`;
+    const frame: MirrorPasteFrame = {
+      event: "mirror_paste",
+      sid,
+      requestId,
+      text,
+      origin: { watcher, ts: Date.now() },
+    };
+
+    return new Promise((resolvePromise) => {
+      const timer = setTimeout(() => {
+        this.pendingPastes.delete(key);
+        resolvePromise({
+          ok: false,
+          error: `Mirror-agent did not respond within ${timeoutMs}ms.`,
+          status: 504,
+        });
+      }, timeoutMs);
+      if (typeof timer === "object" && "unref" in timer) timer.unref();
+
+      this.pendingPastes.set(key, {
+        resolve: (path) => {
+          clearTimeout(timer);
+          this.pendingPastes.delete(key);
+          resolvePromise({ ok: true, path });
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          this.pendingPastes.delete(key);
+          resolvePromise({
+            ok: false,
+            error: err.message,
+            status: err.status,
+          });
+        },
+        timer,
+      });
+
+      try {
+        // biome-ignore lint/style/noNonNullAssertion: null-checked above
+        entry.agent!.ws.send(JSON.stringify(frame));
+      } catch (err) {
+        const pending = this.pendingPastes.get(key);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingPastes.delete(key);
+        }
+        resolvePromise({
+          ok: false,
+          error: `Failed to relay to mirror-agent: ${String(err)}`,
+          status: 502,
+        });
+      }
+    });
+  }
+
+  /**
+   * Called from ws-mirror-plugin when the agent sends back a
+   * MirrorPasteDoneFrame. Settles the pending promise from relayPaste.
+   */
+  resolvePaste(
+    sid: string,
+    requestId: string,
+    result: { path?: string; error?: string },
+  ): void {
+    const key = `${sid}:${requestId}`;
+    const pending = this.pendingPastes.get(key);
+    if (!pending) return;
+    if (result.path) {
+      pending.resolve(result.path);
+    } else {
+      pending.reject({
+        status: 502,
+        message: result.error ?? "mirror-agent reported an unknown error",
+      });
+    }
+  }
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────
@@ -552,245 +674,339 @@ export interface MirrorPluginDeps {
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
   const { mirrorRegistry, externalHost, port } = deps;
 
-  return new Elysia({ prefix: "/api/mirror" })
-    .post("/session", ({ body, set, request }) => {
-      const payload = body as {
-        owner_agent?: string;
-        cwd?: string;
-        sid?: string;
-      };
-      if (!payload.owner_agent || !payload.cwd) {
-        set.status = 400;
-        return { error: "Missing required fields: owner_agent, cwd" };
-      }
-      const remote = remoteKeyFor(request);
-      if (!sessionCreateLimiter.allow(remote)) {
-        const waitMs = sessionCreateLimiter.retryAfterMs(remote);
-        set.status = 429;
-        set.headers["retry-after"] = String(
-          Math.max(1, Math.ceil(waitMs / 1000)),
-        );
-        return { error: "Rate limit: too many session creations." };
-      }
-      const result = mirrorRegistry.createSession(
-        payload.owner_agent,
-        payload.cwd,
-        payload.sid,
-      );
-      if (!result.ok) {
-        set.status = 409;
-        return { error: result.error };
-      }
-      const host = resolveMirrorHost(externalHost, port, request);
-      const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${result.entry.sid}#token=${result.token}`;
-      return {
-        sid: result.entry.sid,
-        owner_token: result.token,
-        mirror_url: mirrorUrl,
-        restored: result.restored,
-      };
-    })
-
-    .get("/sessions/all", ({ request }) => {
-      // All live mirror sessions including owner tokens. Intended for the
-      // hub's internal dashboard on a trusted network — the same trust
-      // posture as the rest of the hub. Do not expose this to a public
-      // dashboard without a further auth layer.
-      const host = resolveMirrorHost(externalHost, port, request);
-      const scheme = schemeFor(request);
-      return mirrorRegistry.listAllWithTokens().map((s) => ({
-        ...s,
-        mirror_url: `${scheme}://${host}/mirror/${s.sid}#token=${s.owner_token}`,
-      }));
-    })
-
-    .get("/sessions", ({ query, set }) => {
-      const owner = (query as Record<string, string | undefined>).owner;
-      if (!owner) {
-        set.status = 400;
-        return { error: "Missing required query: owner" };
-      }
-      return mirrorRegistry.listOwnedBy(owner);
-    })
-
-    .get("/:sid/transcript", ({ params, query, set }) => {
-      const token = (query as Record<string, string | undefined>).t;
-      const validation = mirrorRegistry.validateToken(params.sid, token);
-      if (!validation.ok) {
-        set.status = validation.status;
-        return { error: validation.error };
-      }
-      const entry = validation.entry;
-      return {
-        sid: entry.sid,
-        owner_agent: entry.ownerAgent,
-        cwd: entry.cwd,
-        created_at: entry.createdAt.toISOString(),
-        last_event_at: entry.lastEventAt.toISOString(),
-        closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
-        transcript: entry.transcript.map((f) => ({
-          uuid: f.uuid,
-          kind: f.kind,
-          ts: f.ts,
-          payload: f.payload,
-        })),
-      };
-    })
-
-    .post("/:sid/close", ({ params, query, set }) => {
-      const token = (query as Record<string, string | undefined>).t;
-      const validation = mirrorRegistry.validateToken(params.sid, token);
-      if (!validation.ok) {
-        set.status = validation.status;
-        return { error: validation.error };
-      }
-      mirrorRegistry.closeSession(params.sid, "exit");
-      return { closed: true };
-    })
-
-    .post("/:sid/share", ({ params, query, set, request }) => {
-      const token = (query as Record<string, string | undefined>).t;
-      const validation = mirrorRegistry.validateToken(params.sid, token);
-      if (!validation.ok) {
-        set.status = validation.status;
-        return { error: validation.error };
-      }
-      if (validation.type !== "owner") {
-        set.status = 403;
-        return { error: "Only the owner can share." };
-      }
-      const issued = mirrorRegistry.issueReaderToken(params.sid);
-      if (!issued.ok) {
-        set.status = issued.status;
-        return { error: issued.error };
-      }
-      const host = resolveMirrorHost(externalHost, port, request);
-      const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${params.sid}#token=${issued.token}`;
-      return {
-        sid: params.sid,
-        reader_token: issued.token,
-        mirror_url: mirrorUrl,
-      };
-    })
-
-    .post("/:sid/revoke", ({ params, query, body, set }) => {
-      const token = (query as Record<string, string | undefined>).t;
-      const validation = mirrorRegistry.validateToken(params.sid, token);
-      if (!validation.ok) {
-        set.status = validation.status;
-        return { error: validation.error };
-      }
-      if (validation.type !== "owner") {
-        set.status = 403;
-        return { error: "Only the owner can revoke." };
-      }
-      const payload = (body ?? {}) as { token?: string; all?: boolean };
-      const target = payload.token;
-      const result = mirrorRegistry.revokeToken(
-        params.sid,
-        payload.all ? undefined : target,
-      );
-      if (!result.ok) {
-        set.status = result.status;
-        return { error: result.error };
-      }
-      return { revoked: result.revoked };
-    })
-
-    .get("/archive/:sid", ({ params, query, set }) => {
-      // Archive lookup does NOT require a live session — reads directly
-      // from the persistence store. Protected by a token, but since the hub
-      // restarted the in-memory token map is gone. For M3 we allow archive
-      // retrieval to anyone on the trust network when CLAUDE_NET_MIRROR_STORE
-      // is set, under the assumption the hub is itself on a trusted network.
-      // Phase M4+ should add a durable token store to fix this.
-      const archived = mirrorRegistry.store.loadArchived(params.sid);
-      if (!archived) {
-        set.status = 404;
-        return { error: "Archive not found." };
-      }
-      // Ack the presence of a ?t= param so the URL format matches live mirror
-      // URLs (helps the dashboard re-use one endpoint for both paths).
-      void query;
-      return archived;
-    })
-
-    .get("/:sid/tokens", ({ params, query, set }) => {
-      const token = (query as Record<string, string | undefined>).t;
-      const validation = mirrorRegistry.validateToken(params.sid, token);
-      if (!validation.ok) {
-        set.status = validation.status;
-        return { error: validation.error };
-      }
-      if (validation.type !== "owner") {
-        set.status = 403;
-        return { error: "Only the owner can list tokens." };
-      }
-      const tokens: Array<{
-        type: MirrorTokenType;
-        token_preview: string;
-        created_at: string;
-        revoked_at: string | null;
-      }> = [];
-      for (const rec of validation.entry.tokens.values()) {
-        tokens.push({
-          type: rec.type,
-          token_preview: `${rec.value.slice(0, 6)}…`,
-          created_at: rec.createdAt.toISOString(),
-          revoked_at: rec.revokedAt ? rec.revokedAt.toISOString() : null,
-        });
-      }
-      return { sid: params.sid, tokens };
-    })
-
-    .post("/:sid/inject", ({ params, query, body, set, request }) => {
-      const token = (query as Record<string, string | undefined>).t;
-      const validation = mirrorRegistry.validateToken(params.sid, token);
-      if (!validation.ok) {
-        set.status = validation.status;
-        return { error: validation.error };
-      }
-      if (validation.type !== "owner") {
-        set.status = 403;
-        return { error: "Reader tokens cannot inject." };
-      }
-      const payload = body as { text?: string; watcher?: string };
-      const text = typeof payload.text === "string" ? payload.text : "";
-      if (text.trim().length === 0) {
-        set.status = 400;
-        return { error: "Empty prompt." };
-      }
-      if (Buffer.byteLength(text, "utf8") > MAX_INJECT_BYTES) {
-        set.status = 413;
-        return { error: `Prompt exceeds ${MAX_INJECT_BYTES} bytes.` };
-      }
-      // Two-tier rate limit: a burst floor (one call per 250ms) plus an
-      // hourly ceiling (CLAUDE_NET_MIRROR_INJECT_RPM per minute, default 20).
-      if (!injectBurstLimiter.allow(params.sid)) {
-        set.status = 429;
-        set.headers["retry-after"] = "1";
-        return { error: "Rate limit: bursts under 250ms rejected." };
-      }
-      if (!injectMinuteLimiter.allow(params.sid)) {
-        const waitMs = injectMinuteLimiter.retryAfterMs(params.sid);
-        set.status = 429;
-        set.headers["retry-after"] = String(
-          Math.max(1, Math.ceil(waitMs / 1000)),
-        );
-        return {
-          error: `Rate limit: ${INJECT_RPM} injects per minute.`,
+  return (
+    new Elysia({ prefix: "/api/mirror" })
+      .post("/session", ({ body, set, request }) => {
+        const payload = body as {
+          owner_agent?: string;
+          cwd?: string;
+          sid?: string;
         };
-      }
-      const watcher = sanitizeWatcher(
-        payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
-      );
-      const result = mirrorRegistry.relayInject(params.sid, text, watcher);
-      if (!result.ok) {
-        set.status = result.status;
-        return { error: result.error };
-      }
-      return { accepted: true, seq: result.seq };
-    });
+        if (!payload.owner_agent || !payload.cwd) {
+          set.status = 400;
+          return { error: "Missing required fields: owner_agent, cwd" };
+        }
+        const remote = remoteKeyFor(request);
+        if (!sessionCreateLimiter.allow(remote)) {
+          const waitMs = sessionCreateLimiter.retryAfterMs(remote);
+          set.status = 429;
+          set.headers["retry-after"] = String(
+            Math.max(1, Math.ceil(waitMs / 1000)),
+          );
+          return { error: "Rate limit: too many session creations." };
+        }
+        const result = mirrorRegistry.createSession(
+          payload.owner_agent,
+          payload.cwd,
+          payload.sid,
+        );
+        if (!result.ok) {
+          set.status = 409;
+          return { error: result.error };
+        }
+        const host = resolveMirrorHost(externalHost, port, request);
+        const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${result.entry.sid}#token=${result.token}`;
+        return {
+          sid: result.entry.sid,
+          owner_token: result.token,
+          mirror_url: mirrorUrl,
+          restored: result.restored,
+        };
+      })
+
+      .get("/sessions/all", ({ request }) => {
+        // All live mirror sessions including owner tokens. Intended for the
+        // hub's internal dashboard on a trusted network — the same trust
+        // posture as the rest of the hub. Do not expose this to a public
+        // dashboard without a further auth layer.
+        const host = resolveMirrorHost(externalHost, port, request);
+        const scheme = schemeFor(request);
+        return mirrorRegistry.listAllWithTokens().map((s) => ({
+          ...s,
+          mirror_url: `${scheme}://${host}/mirror/${s.sid}#token=${s.owner_token}`,
+        }));
+      })
+
+      .get("/sessions", ({ query, set }) => {
+        const owner = (query as Record<string, string | undefined>).owner;
+        if (!owner) {
+          set.status = 400;
+          return { error: "Missing required query: owner" };
+        }
+        return mirrorRegistry.listOwnedBy(owner);
+      })
+
+      .get("/:sid/transcript", ({ params, query, set }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        const entry = validation.entry;
+        return {
+          sid: entry.sid,
+          owner_agent: entry.ownerAgent,
+          cwd: entry.cwd,
+          created_at: entry.createdAt.toISOString(),
+          last_event_at: entry.lastEventAt.toISOString(),
+          closed_at: entry.closedAt ? entry.closedAt.toISOString() : null,
+          transcript: entry.transcript.map((f) => ({
+            uuid: f.uuid,
+            kind: f.kind,
+            ts: f.ts,
+            payload: f.payload,
+          })),
+        };
+      })
+
+      .post("/:sid/close", ({ params, query, set }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        mirrorRegistry.closeSession(params.sid, "exit");
+        return { closed: true };
+      })
+
+      .post("/:sid/share", ({ params, query, set, request }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Only the owner can share." };
+        }
+        const issued = mirrorRegistry.issueReaderToken(params.sid);
+        if (!issued.ok) {
+          set.status = issued.status;
+          return { error: issued.error };
+        }
+        const host = resolveMirrorHost(externalHost, port, request);
+        const mirrorUrl = `${schemeFor(request)}://${host}/mirror/${params.sid}#token=${issued.token}`;
+        return {
+          sid: params.sid,
+          reader_token: issued.token,
+          mirror_url: mirrorUrl,
+        };
+      })
+
+      .post("/:sid/revoke", ({ params, query, body, set }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Only the owner can revoke." };
+        }
+        const payload = (body ?? {}) as { token?: string; all?: boolean };
+        const target = payload.token;
+        const result = mirrorRegistry.revokeToken(
+          params.sid,
+          payload.all ? undefined : target,
+        );
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { revoked: result.revoked };
+      })
+
+      .get("/archive/:sid", ({ params, query, set }) => {
+        // Archive lookup does NOT require a live session — reads directly
+        // from the persistence store. Protected by a token, but since the hub
+        // restarted the in-memory token map is gone. For M3 we allow archive
+        // retrieval to anyone on the trust network when CLAUDE_NET_MIRROR_STORE
+        // is set, under the assumption the hub is itself on a trusted network.
+        // Phase M4+ should add a durable token store to fix this.
+        const archived = mirrorRegistry.store.loadArchived(params.sid);
+        if (!archived) {
+          set.status = 404;
+          return { error: "Archive not found." };
+        }
+        // Ack the presence of a ?t= param so the URL format matches live mirror
+        // URLs (helps the dashboard re-use one endpoint for both paths).
+        void query;
+        return archived;
+      })
+
+      .get("/:sid/tokens", ({ params, query, set }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Only the owner can list tokens." };
+        }
+        const tokens: Array<{
+          type: MirrorTokenType;
+          token_preview: string;
+          created_at: string;
+          revoked_at: string | null;
+        }> = [];
+        for (const rec of validation.entry.tokens.values()) {
+          tokens.push({
+            type: rec.type,
+            token_preview: `${rec.value.slice(0, 6)}…`,
+            created_at: rec.createdAt.toISOString(),
+            revoked_at: rec.revokedAt ? rec.revokedAt.toISOString() : null,
+          });
+        }
+        return { sid: params.sid, tokens };
+      })
+
+      .post("/:sid/inject", ({ params, query, body, set, request }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Reader tokens cannot inject." };
+        }
+        const payload = body as { text?: string; watcher?: string };
+        const text = typeof payload.text === "string" ? payload.text : "";
+        if (text.trim().length === 0) {
+          set.status = 400;
+          return { error: "Empty prompt." };
+        }
+        if (Buffer.byteLength(text, "utf8") > MAX_INJECT_BYTES) {
+          set.status = 413;
+          return { error: `Prompt exceeds ${MAX_INJECT_BYTES} bytes.` };
+        }
+        // Two-tier rate limit: a burst floor (one call per 250ms) plus an
+        // hourly ceiling (CLAUDE_NET_MIRROR_INJECT_RPM per minute, default 20).
+        if (!injectBurstLimiter.allow(params.sid)) {
+          set.status = 429;
+          set.headers["retry-after"] = "1";
+          return { error: "Rate limit: bursts under 250ms rejected." };
+        }
+        if (!injectMinuteLimiter.allow(params.sid)) {
+          const waitMs = injectMinuteLimiter.retryAfterMs(params.sid);
+          set.status = 429;
+          set.headers["retry-after"] = String(
+            Math.max(1, Math.ceil(waitMs / 1000)),
+          );
+          return {
+            error: `Rate limit: ${INJECT_RPM} injects per minute.`,
+          };
+        }
+        const watcher = sanitizeWatcher(
+          payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayInject(params.sid, text, watcher);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true, seq: result.seq };
+      })
+
+      /**
+       * POST /:sid/paste — oversized-prompt path. The web compose box falls back
+       * to this when the payload exceeds the inject cap: hub relays the blob to
+       * the mirror-agent, which writes it to a local temp file; hub then injects
+       * `@<path>` via the existing tmux path so the user's Claude picks it up
+       * with the Read tool.
+       */
+      .post("/:sid/paste", async ({ params, query, body, set, request }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Reader tokens cannot paste." };
+        }
+        const payload = body as { text?: string; watcher?: string };
+        const text = typeof payload.text === "string" ? payload.text : "";
+        if (text.trim().length === 0) {
+          set.status = 400;
+          return { error: "Empty paste." };
+        }
+        if (Buffer.byteLength(text, "utf8") > MAX_PASTE_BYTES) {
+          set.status = 413;
+          return {
+            error: `Paste exceeds ${MAX_PASTE_BYTES} bytes (cap: ${Math.floor(MAX_PASTE_BYTES / (1024 * 1024))} MB).`,
+          };
+        }
+        if (!injectBurstLimiter.allow(params.sid)) {
+          set.status = 429;
+          set.headers["retry-after"] = "1";
+          return { error: "Rate limit: bursts under 250ms rejected." };
+        }
+        if (!injectMinuteLimiter.allow(params.sid)) {
+          const waitMs = injectMinuteLimiter.retryAfterMs(params.sid);
+          set.status = 429;
+          set.headers["retry-after"] = String(
+            Math.max(1, Math.ceil(waitMs / 1000)),
+          );
+          return {
+            error: `Rate limit: ${INJECT_RPM} injects per minute.`,
+          };
+        }
+        const watcher = sanitizeWatcher(
+          payload.watcher ?? request.headers.get("user-agent") ?? "unknown",
+        );
+        const pasted = await mirrorRegistry.relayPaste(
+          params.sid,
+          text,
+          watcher,
+          PASTE_TIMEOUT_MS,
+        );
+        if (!pasted.ok) {
+          set.status = pasted.status;
+          return { error: pasted.error };
+        }
+        // Auto-inject `@<path>` so Claude reads the file immediately.
+        const reference = `@${pasted.path}`;
+        const relay = mirrorRegistry.relayInject(
+          params.sid,
+          reference,
+          watcher,
+        );
+        if (!relay.ok) {
+          // File is written but inject failed — surface both.
+          set.status = relay.status;
+          return {
+            error: `Paste saved to ${pasted.path} but inject failed: ${relay.error}`,
+            path: pasted.path,
+          };
+        }
+        return {
+          accepted: true,
+          path: pasted.path,
+          reference,
+          bytes: Buffer.byteLength(text, "utf8"),
+          seq: relay.seq,
+        };
+      })
+
+      /**
+       * GET /config — client hints so the dashboard can size-check before POST.
+       * Public (no session needed) because it's just limits, not data.
+       */
+      .get("/config", () => ({
+        inject_max_kb: Math.floor(MAX_INJECT_BYTES / 1024),
+        paste_max_mb: Math.floor(MAX_PASTE_BYTES / (1024 * 1024)),
+        inject_rpm: INJECT_RPM,
+      }))
+  );
 }
 
 // ── Inject limits & helpers ───────────────────────────────────────────────
@@ -805,6 +1021,16 @@ const INJECT_RPM = (() => {
   const raw = Number(process.env.CLAUDE_NET_MIRROR_INJECT_RPM);
   return Number.isFinite(raw) && raw > 0 ? raw : 20;
 })();
+
+/** Oversized-paste cap. Default 64 MB — arbitrary but DoS-safe. */
+const MAX_PASTE_BYTES = (() => {
+  const raw = Number(process.env.CLAUDE_NET_MIRROR_PASTE_MAX_MB);
+  const mb = Number.isFinite(raw) && raw > 0 ? raw : 64;
+  return mb * 1024 * 1024;
+})();
+
+/** Timeout for the agent to ack a paste write. */
+const PASTE_TIMEOUT_MS = 10_000;
 
 // One inject per 250ms (burst control) AND at most INJECT_RPM per minute.
 const injectBurstLimiter = new RateLimiter({ max: 1, windowMs: 250 });
@@ -1002,6 +1228,15 @@ export function wsMirrorPlugin(
           meta.sid,
           frame as unknown as MirrorEventFrame,
         );
+      } else if (
+        frame.action === "mirror_paste_done" &&
+        frame.sid === meta.sid &&
+        typeof frame.requestId === "string"
+      ) {
+        mirrorRegistry.resolvePaste(meta.sid, frame.requestId, {
+          path: typeof frame.path === "string" ? frame.path : undefined,
+          error: typeof frame.error === "string" ? frame.error : undefined,
+        });
       }
     },
 

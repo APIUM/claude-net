@@ -80,6 +80,18 @@ export interface MirrorEventFrame {
   requestId?: string;
 }
 
+/**
+ * Agent → hub reply to a MirrorPasteFrame request. Either `path` (success)
+ * or `error` (failure) will be set, keyed on the same `requestId`.
+ */
+export interface MirrorPasteDoneFrame {
+  action: "mirror_paste_done";
+  sid: string;
+  requestId: string;
+  path?: string;
+  error?: string;
+}
+
 export type PluginFrame =
   | RegisterFrame
   | SendFrame
@@ -90,7 +102,8 @@ export type PluginFrame =
   | ListAgentsFrame
   | ListTeamsFrame
   | PingFrame
-  | MirrorEventFrame;
+  | MirrorEventFrame
+  | MirrorPasteDoneFrame;
 
 // ── Hub → Plugin frames (discriminated union on `event`) ──────────────────
 
@@ -133,6 +146,19 @@ export interface MirrorInjectFrame {
   origin: { watcher: string; ts: number };
 }
 
+/**
+ * Hub → agent request to stash a blob too large for a single tmux inject.
+ * Agent writes the text to a local temp file and replies with
+ * MirrorPasteDoneFrame carrying the path.
+ */
+export interface MirrorPasteFrame {
+  event: "mirror_paste";
+  sid: string;
+  requestId: string;
+  text: string;
+  origin: { watcher: string; ts: number };
+}
+
 export interface MirrorControlFrame {
   event: "mirror_control";
   sid: string;
@@ -145,6 +171,7 @@ export type HubFrame =
   | RegisteredFrame
   | ErrorFrame
   | MirrorInjectFrame
+  | MirrorPasteFrame
   | MirrorControlFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────

@@ -553,6 +553,7 @@
   .mirror-compose button:hover { opacity: 0.85; }
   .mirror-compose button:disabled { opacity: 0.4; cursor: default; }
   .mirror-compose-err { font-size: 12px; color: var(--red); padding: 4px 12px; min-height: 18px; }
+  .mirror-compose-err.is-notice { color: var(--green); }
 
   .mirror-share-btn {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
@@ -2334,12 +2335,40 @@
     var composeErr = document.getElementById('mirror-compose-err');
     if (composeEl) composeEl.classList.remove('compose-hidden');
 
+    // Size caps come from the hub — fetched once so the compose box can
+    // pick /inject vs /paste based on payload size. Sensible fallbacks
+    // let sends keep working if the fetch fails.
+    var injectMaxBytes = 512 * 1024;
+    var pasteMaxBytes = 64 * 1024 * 1024;
+    fetch('/api/mirror/config')
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(cfg) {
+        if (cfg && cfg.inject_max_kb) injectMaxBytes = cfg.inject_max_kb * 1024;
+        if (cfg && cfg.paste_max_mb) pasteMaxBytes = cfg.paste_max_mb * 1024 * 1024;
+      })
+      .catch(function() { /* keep fallbacks */ });
+
+    function utf8Bytes(s) {
+      try { return new TextEncoder().encode(s).length; }
+      catch (e) { return s.length; }
+    }
+
     function doInject() {
       var text = composeText.value;
       if (!text || !text.trim()) return;
+      var size = utf8Bytes(text);
+      if (size > pasteMaxBytes) {
+        composeErr.className = 'mirror-compose-err';
+        composeErr.textContent =
+          'Too large: ' + size + ' bytes (cap ' + pasteMaxBytes + ').';
+        return;
+      }
       composeSend.disabled = true;
+      composeErr.className = 'mirror-compose-err';
       composeErr.textContent = '';
-      fetch('/api/mirror/' + encodeURIComponent(sid) + '/inject?t=' + encodeURIComponent(token), {
+      var useLargeBlobPath = size > injectMaxBytes;
+      var endpoint = useLargeBlobPath ? '/paste' : '/inject';
+      fetch('/api/mirror/' + encodeURIComponent(sid) + endpoint + '?t=' + encodeURIComponent(token), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, watcher: 'web' })
@@ -2348,13 +2377,23 @@
         .then(function(r) {
           composeSend.disabled = false;
           if (r.status >= 400) {
+            composeErr.className = 'mirror-compose-err';
             composeErr.textContent = (r.body && r.body.error) || ('HTTP ' + r.status);
           } else {
             composeText.value = '';
+            composeErr.className = 'mirror-compose-err is-notice';
+            if (useLargeBlobPath && r.body && r.body.path) {
+              composeErr.textContent =
+                'Large paste (' + size + ' B) saved to ' + r.body.path +
+                ' and injected as ' + r.body.reference;
+            } else {
+              composeErr.textContent = '';
+            }
           }
         })
         .catch(function(err) {
           composeSend.disabled = false;
+          composeErr.className = 'mirror-compose-err';
           composeErr.textContent = 'Send failed: ' + (err && err.message ? err.message : err);
         });
     }

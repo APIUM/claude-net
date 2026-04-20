@@ -65,6 +65,30 @@ const DEFAULT_SESSION_IDLE_MS = 10 * 60 * 1000;
 const OUTBOX_MAX = 4096;
 const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
 
+/** Directory where oversized web-pastes land as `paste-<uuid>.txt`. */
+const PASTE_DIR = "/tmp/claude-net/pastes";
+/** Delete paste files older than this on agent startup. */
+const PASTE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+function cleanupOldPastes(): void {
+  try {
+    const entries = fs.readdirSync(PASTE_DIR, { withFileTypes: true });
+    const cutoff = Date.now() - PASTE_RETENTION_MS;
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.startsWith("paste-")) continue;
+      const full = path.join(PASTE_DIR, entry.name);
+      try {
+        const stat = fs.statSync(full);
+        if (stat.mtimeMs < cutoff) fs.unlinkSync(full);
+      } catch {
+        // ignore per-file errors
+      }
+    }
+  } catch {
+    // directory may not exist yet — that's fine
+  }
+}
+
 function clampAssistantText(s: string): { value: string; truncated: boolean } {
   if (Buffer.byteLength(s, "utf8") <= MAX_ASSISTANT_TEXT_BYTES) {
     return { value: s, truncated: false };
@@ -100,6 +124,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   } catch (err) {
     log(`Failed to create state dir: ${String(err)}`);
   }
+
+  // Prune stale pastes left by previous runs (anything older than 24 h).
+  cleanupOldPastes();
 
   // Bind server. Bun's serve/fetch API is used here; we import Bun lazily so
   // this file remains type-checkable outside Bun.
@@ -585,6 +612,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       event?: string;
       text?: string;
       seq?: number;
+      requestId?: string;
       origin?: { watcher?: string };
     };
     try {
@@ -601,6 +629,69 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       void handleInject(session, text, watcher).catch((err: unknown) => {
         log(`[${session.sid}] inject handler threw: ${String(err)}`);
       });
+    } else if (data.event === "mirror_paste") {
+      const text = typeof data.text === "string" ? data.text : "";
+      const requestId =
+        typeof data.requestId === "string" ? data.requestId : "";
+      const watcher =
+        typeof data.origin?.watcher === "string"
+          ? data.origin.watcher
+          : "unknown";
+      if (!requestId) return;
+      void handlePaste(session, requestId, text, watcher).catch(
+        (err: unknown) => {
+          log(`[${session.sid}] paste handler threw: ${String(err)}`);
+          sendPasteResponse(session, requestId, { error: String(err) });
+        },
+      );
+    }
+  }
+
+  async function handlePaste(
+    session: SessionState,
+    requestId: string,
+    text: string,
+    watcher: string,
+  ): Promise<void> {
+    try {
+      fs.mkdirSync(PASTE_DIR, { recursive: true, mode: 0o700 });
+    } catch (err) {
+      sendPasteResponse(session, requestId, {
+        error: `Failed to create paste dir: ${String(err)}`,
+      });
+      return;
+    }
+    const id = crypto.randomUUID();
+    const filePath = path.join(PASTE_DIR, `paste-${id}.txt`);
+    try {
+      fs.writeFileSync(filePath, text, { mode: 0o600 });
+    } catch (err) {
+      sendPasteResponse(session, requestId, {
+        error: `Failed to write paste file: ${String(err)}`,
+      });
+      return;
+    }
+    emitAuditEvent(
+      session,
+      `paste from ${watcher}: saved ${Buffer.byteLength(text, "utf8")} bytes → ${filePath}`,
+    );
+    sendPasteResponse(session, requestId, { path: filePath });
+  }
+
+  function sendPasteResponse(
+    session: SessionState,
+    requestId: string,
+    result: { path?: string; error?: string },
+  ): void {
+    const frame = {
+      action: "mirror_paste_done" as const,
+      sid: session.sid,
+      requestId,
+      ...(result.path ? { path: result.path } : {}),
+      ...(result.error ? { error: result.error } : {}),
+    };
+    if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
+      log(`[${session.sid}] failed to send paste ack (hub disconnected)`);
     }
   }
 

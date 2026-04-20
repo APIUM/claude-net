@@ -168,6 +168,76 @@ describe("MirrorRegistry", () => {
     expect(mine.every((s) => s.owner_agent === "a:u@h")).toBe(true);
   });
 
+  test("relayPaste sends frame and resolves when agent ack arrives", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    const sent: string[] = [];
+    reg.setAgentConnection(sid, {
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+    });
+    const pending = reg.relayPaste(sid, "hello world", "web", 5000);
+    expect(sent).toHaveLength(1);
+    // biome-ignore lint/style/noNonNullAssertion: length asserted above
+    const frame = JSON.parse(sent[0]!) as Record<string, unknown>;
+    expect(frame.event).toBe("mirror_paste");
+    expect(frame.text).toBe("hello world");
+    expect(typeof frame.requestId).toBe("string");
+    reg.resolvePaste(sid, frame.requestId as string, {
+      path: "/tmp/claude-net/pastes/paste-abc.txt",
+    });
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.path).toBe("/tmp/claude-net/pastes/paste-abc.txt");
+  });
+
+  test("relayPaste rejects with agent error when ack carries one", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    const sent: string[] = [];
+    reg.setAgentConnection(sid, {
+      ws: { send: (s: string) => sent.push(s) },
+      wsIdentity: {},
+    });
+    const pending = reg.relayPaste(sid, "x", "web", 5000);
+    // biome-ignore lint/style/noNonNullAssertion: send collected above
+    const requestId = (JSON.parse(sent[0]!) as { requestId: string }).requestId;
+    reg.resolvePaste(sid, requestId, { error: "disk full" });
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain("disk full");
+    expect(result.status).toBe(502);
+  });
+
+  test("relayPaste times out when agent never acks", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.setAgentConnection(sid, {
+      ws: { send: () => {} },
+      wsIdentity: {},
+    });
+    const result = await reg.relayPaste(sid, "x", "web", 30);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(504);
+    expect(result.error).toContain("did not respond");
+  });
+
+  test("relayPaste rejects when session has no connected agent", async () => {
+    const r = reg.createSession("a:u@h", "/a");
+    if (!r.ok) return;
+    const result = await reg.relayPaste(r.entry.sid, "x", "web", 500);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe(503);
+  });
+
   test("dashboard broadcast fires on session lifecycle", () => {
     const events: { event: string }[] = [];
     reg.setDashboardBroadcast((e) => events.push(e as { event: string }));
