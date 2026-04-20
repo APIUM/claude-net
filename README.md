@@ -27,7 +27,7 @@ The fastest way to see it work. Run the hub and a session on the same box.
 
 ```bash
 # 1. Start the hub
-docker run -d -p 4815:4815 ghcr.io/andrewleech/claude-net
+docker run -d -p 4815:4815 ghcr.io/apium/claude-net
 
 # 2. Register the MCP server (user-wide)
 curl http://localhost:4815/setup | bash
@@ -46,7 +46,7 @@ One hub, many agents across the network. Run the container on a machine everyone
 # On the hub host (example: telie.story-kettle.ts.net)
 docker run -d -p 4815:4815 \
   -e CLAUDE_NET_HOST=telie.story-kettle.ts.net \
-  ghcr.io/andrewleech/claude-net
+  ghcr.io/apium/claude-net
 
 # On each participant's machine
 curl http://telie.story-kettle.ts.net:4815/setup | bash
