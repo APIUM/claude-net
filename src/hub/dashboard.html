@@ -1094,7 +1094,32 @@
     background: var(--bg-panel);
   }
   @media (max-width: 700px) {
+    /* On narrow screens: suppress the 'send/newline' hint lines (they
+       take too much room next to the button) — the mode toggle button
+       is enough of a signal. */
     .mirror-compose-hint { display: none; }
+  }
+
+  /* Enter-mode toggle: small, subtle button that lives in the actions
+     cluster next to the keyboard-hint. Clicking flips Enter between
+     'send' and 'newline' modes and persists in localStorage. */
+  .mirror-compose-mode {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    cursor: pointer;
+    white-space: nowrap;
+    align-self: center;
+    transition: color 0.1s, border-color 0.1s;
+  }
+  .mirror-compose-mode:hover {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   .mirror-compose button {
@@ -3238,11 +3263,70 @@
     }
 
     if (composeSend) composeSend.addEventListener('click', doInject);
+
+    // ── Enter-key mode ───────────────────────────────────────────
+    // Touch-primary devices (phones, tablets without a hardware
+    // keyboard) have no Shift+Enter available, so Enter-sends becomes
+    // a trap: every newline submits. Default to "enter = newline"
+    // there, and let the user flip it either way via a small toggle
+    // (persisted per-browser in localStorage).
+    var STORAGE_KEY = 'claude-net.mirror.enter-mode';
+    var isTouchPrimary = false;
+    try {
+      isTouchPrimary = window.matchMedia(
+        '(hover: none) and (pointer: coarse)'
+      ).matches;
+    } catch (e) { /* older browsers — assume desktop */ }
+    // enterMode: 'send' (Enter sends) or 'newline' (Enter = newline).
+    var enterMode = localStorage.getItem(STORAGE_KEY);
+    if (enterMode !== 'send' && enterMode !== 'newline') {
+      enterMode = isTouchPrimary ? 'newline' : 'send';
+    }
+    var hintEl = composeEl && composeEl.querySelector('.mirror-compose-hint');
+    function applyEnterMode() {
+      if (!hintEl) return;
+      if (enterMode === 'newline') {
+        hintEl.innerHTML =
+          '<kbd>tap</kbd> transmit<br>' +
+          '<kbd>↵</kbd> newline';
+      } else {
+        hintEl.innerHTML =
+          '<kbd>↵</kbd> send<br>' +
+          '<kbd>⇧↵</kbd> newline';
+      }
+      if (toggleBtn) {
+        toggleBtn.textContent = enterMode === 'newline' ? '↵ = new line' : '↵ = send';
+        toggleBtn.title = 'Switch to ' + (enterMode === 'newline' ? 'Enter sends' : 'Enter = new line');
+      }
+    }
+    // Small toggle button — tucked into the actions cluster.
+    var actions = composeEl && composeEl.querySelector('.mirror-compose-actions');
+    var toggleBtn = null;
+    if (actions && hintEl) {
+      toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.className = 'mirror-compose-mode';
+      toggleBtn.addEventListener('click', function() {
+        enterMode = enterMode === 'newline' ? 'send' : 'newline';
+        try { localStorage.setItem(STORAGE_KEY, enterMode); } catch (e) {}
+        applyEnterMode();
+        composeText.focus();
+      });
+      // Place the toggle before the hint — reading order: toggle, hint, send.
+      actions.insertBefore(toggleBtn, hintEl);
+    }
+    applyEnterMode();
+
     if (composeText) {
       composeText.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          doInject();
+        if (e.key !== 'Enter') return;
+        if (enterMode === 'newline') {
+          // Shift+Enter still sends in newline mode — inverse of desktop.
+          if (e.shiftKey) { e.preventDefault(); doInject(); }
+          // else: let the textarea insert the newline naturally.
+        } else {
+          if (!e.shiftKey) { e.preventDefault(); doInject(); }
+          // else: Shift+Enter inserts a newline naturally.
         }
       });
     }
