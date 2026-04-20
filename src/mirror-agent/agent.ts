@@ -88,15 +88,39 @@ const THINKING_POLL_MS = 2_000;
 const THINKING_IDLE_MS = 8_000;
 
 function extractThinkingStatus(paneText: string): string | null {
-  // Claude Code's active thinking line starts with ✻ and looks like:
-  //   ✻ Brewed for 42s
-  //   ✻ Thinking for 3s
-  //   ✻ Compacting…
-  // Scan bottom-up so we pick up the most recent occurrence.
+  // Claude Code's TUI ends each turn by leaving a `✻ Brewed for Ns`
+  // footer in the content area, so scrollback is full of them. We only
+  // want the CURRENTLY-active one: the last non-empty line of the
+  // content area (i.e. the line immediately above the input-box top
+  // separator `────────`). If that line starts with ✻, Claude is
+  // actively thinking; anything else means the turn is done.
   const lines = paneText.split("\n");
+  const sepRx = /^─{20,}$/;
+  // Scan bottom-up. The tail of the pane looks like:
+  //   [content area]
+  //   ────────        ← top-of-input separator (second match up)
+  //   ❯ …             ← input lines (any count)
+  //   ────────        ← bottom-of-input separator (first match up)
+  //   statusline
+  // Find the second separator going up; the content area ends on the
+  // line immediately above it.
+  let topSepIdx = -1;
+  let sepsSeen = 0;
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (sepRx.test((lines[i] ?? "").trim())) {
+      sepsSeen++;
+      if (sepsSeen === 2) {
+        topSepIdx = i;
+        break;
+      }
+    }
+  }
+  if (topSepIdx <= 0) return null;
+  // Find the last non-empty line above the separator.
+  for (let i = topSepIdx - 1; i >= 0; i--) {
     const trimmed = (lines[i] ?? "").trim();
-    if (trimmed.startsWith("✻")) return trimmed;
+    if (!trimmed) continue;
+    return trimmed.startsWith("✻") ? trimmed : null;
   }
   return null;
 }
@@ -369,10 +393,11 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // Stop / SubagentStop fire at turn end and carry only the FINAL
     // assistant text block. When the JSONL tail is running for this
     // session we already emit every text block (including the final
-    // one), so suppress the hook-sourced duplicate. Fall through and
-    // emit when no tail is active — better a degraded stream (only the
-    // final text) than silence.
+    // one), so suppress the hook-sourced duplicate. The hook's arrival
+    // is still our "turn ended" signal for the thinking indicator —
+    // stop the poller before returning.
     if (ingested.frame.kind === "assistant_message" && session.tail !== null) {
+      stopThinkingPoller(session, "turn-end");
       return new Response("suppressed-tail-active", { status: 202 });
     }
 
