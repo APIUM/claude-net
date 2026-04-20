@@ -337,11 +337,12 @@
   }
   .m-evt-user .m-label { color: var(--blue); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
   @media (max-width: 700px) {
+    /* On narrow screens the bubble stretches full width (no wasted
+       space) but keeps the right border so 'user' is still visually
+       distinct from assistant messages at a glance. */
     .m-evt-user {
       align-self: stretch;
       max-width: none;
-      border-right: none;
-      border-left: 3px solid var(--blue);
     }
   }
 
