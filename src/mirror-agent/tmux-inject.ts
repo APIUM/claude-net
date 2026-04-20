@@ -101,6 +101,22 @@ export class TmuxInjector {
     return { ok: true };
   }
 
+  /** Send a single Escape keypress to the pane — mirrors the TUI's
+   *  "Esc to interrupt" behaviour. No Enter follow-up; the key is
+   *  self-contained. */
+  async sendEscape(pane: string): Promise<InjectResult> {
+    const result = await runTmux(this.tmuxBin, [
+      "send-keys",
+      "-t",
+      pane,
+      "Escape",
+    ]);
+    if (!result.ok) {
+      return { ok: false, code: "tmux_failed", error: result.error };
+    }
+    return { ok: true };
+  }
+
   /** Test helper: clear the rate-limit state. */
   resetRateLimit(sid?: string): void {
     if (sid) this.lastInjectAt.delete(sid);

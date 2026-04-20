@@ -187,6 +187,17 @@ export interface MirrorListCommandsFrame {
   requestId: string;
 }
 
+/**
+ * Hub → agent request to send an Escape keypress to the session's
+ * pane — mirrors the TUI "Esc to interrupt" shortcut. Fire and
+ * forget, no correlated ack.
+ */
+export interface MirrorStopFrame {
+  event: "mirror_stop";
+  sid: string;
+  origin: { watcher: string; ts: number };
+}
+
 export interface MirrorControlFrame {
   event: "mirror_control";
   sid: string;
@@ -201,6 +212,7 @@ export type HubFrame =
   | MirrorInjectFrame
   | MirrorPasteFrame
   | MirrorListCommandsFrame
+  | MirrorStopFrame
   | MirrorControlFrame;
 
 // ── Hub → Dashboard frames (discriminated union on `event`) ───────────────

@@ -8,6 +8,7 @@ import type {
   MirrorListCommandsFrame,
   MirrorPasteFrame,
   MirrorSessionSummary,
+  MirrorStopFrame,
   MirrorTokenType,
 } from "@/shared/types";
 
@@ -534,6 +535,40 @@ export class MirrorRegistry {
       };
     }
     return { ok: true, seq };
+  }
+
+  /** Relay a "stop" (Esc) signal to the session's agent. Fire and
+   *  forget — no correlated ack. */
+  relayStop(
+    sid: string,
+    watcher: string,
+  ): { ok: true } | { ok: false; error: string; status: number } {
+    const entry = this.sessions.get(sid);
+    if (!entry)
+      return { ok: false, error: `Session '${sid}' not found.`, status: 404 };
+    if (entry.closedAt)
+      return { ok: false, error: "Session is closed.", status: 409 };
+    if (!entry.agent)
+      return {
+        ok: false,
+        error: "Mirror-agent is not connected for this session.",
+        status: 503,
+      };
+    const frame: MirrorStopFrame = {
+      event: "mirror_stop",
+      sid,
+      origin: { watcher, ts: Date.now() },
+    };
+    try {
+      entry.agent.ws.send(JSON.stringify(frame));
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Failed to relay to mirror-agent: ${String(err)}`,
+        status: 502,
+      };
+    }
+    return { ok: true };
   }
 
   /**
@@ -1121,6 +1156,38 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         paste_max_mb: Math.floor(MAX_PASTE_BYTES / (1024 * 1024)),
         inject_rpm: INJECT_RPM,
       }))
+
+      /**
+       * POST /:sid/stop — send Escape to the session's tmux pane.
+       * Owner-only. Fire-and-forget; response is just confirmation
+       * that the frame was relayed.
+       */
+      .post("/:sid/stop", ({ params, query, set, request }) => {
+        const token = (query as Record<string, string | undefined>).t;
+        const validation = mirrorRegistry.validateToken(params.sid, token);
+        if (!validation.ok) {
+          set.status = validation.status;
+          return { error: validation.error };
+        }
+        if (validation.type !== "owner") {
+          set.status = 403;
+          return { error: "Reader tokens cannot stop the session." };
+        }
+        if (!injectBurstLimiter.allow(params.sid)) {
+          set.status = 429;
+          set.headers["retry-after"] = "1";
+          return { error: "Rate limit: bursts under 250ms rejected." };
+        }
+        const watcher = sanitizeWatcher(
+          request.headers.get("user-agent") ?? "unknown",
+        );
+        const result = mirrorRegistry.relayStop(params.sid, watcher);
+        if (!result.ok) {
+          set.status = result.status;
+          return { error: result.error };
+        }
+        return { accepted: true };
+      })
 
       /**
        * GET /:sid/commands — list slash commands available to this

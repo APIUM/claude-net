@@ -1338,6 +1338,7 @@
   .mirror-compose-err:empty { display: none; }
 
   .mirror-share-btn,
+  .mirror-stop-btn,
   .theme-toggle {
     background: transparent;
     color: var(--text-dim);
@@ -1348,11 +1349,18 @@
     letter-spacing: 1.2px;
     text-transform: uppercase;
     cursor: pointer;
-    transition: color 0.1s, border-color 0.1s;
+    transition: color 0.1s, border-color 0.1s, background 0.1s;
     white-space: nowrap;
   }
   .mirror-share-btn:hover,
+  .mirror-stop-btn:hover,
   .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+  .mirror-stop-btn { color: var(--accent); border-color: var(--accent-dim); }
+  .mirror-stop-btn:hover { background: var(--accent); color: var(--on-accent); }
+  .mirror-stop-btn:disabled {
+    color: var(--text-muted); border-color: var(--border);
+    background: transparent; cursor: default;
+  }
 
   .mirror-status {
     font-family: var(--font-mono);
@@ -1739,6 +1747,7 @@
       <span class="cwd" id="mirror-cwd"></span>
       <span id="mirror-owner"></span>
       <span id="mirror-conn">connecting…</span>
+      <button id="mirror-stop-btn" class="mirror-stop-btn" type="button" style="display:none" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
       <button id="mirror-share-btn" class="mirror-share-btn" type="button" style="display:none" title="Create a read-only share link">share</button>
       <button type="button" class="theme-toggle" data-theme-toggle title="Switch theme">◐ DARK</button>
     </div>
@@ -3353,6 +3362,8 @@
       isOwner = msg.token_type === 'owner';
       var shareBtn = document.getElementById('mirror-share-btn');
       if (shareBtn) shareBtn.style.display = isOwner ? '' : 'none';
+      var stopBtn = document.getElementById('mirror-stop-btn');
+      if (stopBtn) stopBtn.style.display = isOwner ? '' : 'none';
       var compose = document.getElementById('mirror-compose');
       if (compose && !isOwner) compose.classList.add('compose-hidden');
       transcriptEl.innerHTML = '';
@@ -3663,6 +3674,23 @@
           // Desktop: Enter sends, Shift+Enter newlines.
           if (!e.shiftKey) { e.preventDefault(); doInject(); }
         }
+      });
+    }
+
+    var stopBtn = document.getElementById('mirror-stop-btn');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', function() {
+        stopBtn.disabled = true;
+        fetch('/api/mirror/' + encodeURIComponent(sid) + '/stop?t=' + encodeURIComponent(token), { method: 'POST' })
+          .then(function(r) { return r.json().then(function(j) { return { status: r.status, body: j }; }); })
+          .then(function(r) {
+            stopBtn.disabled = false;
+            if (r.status >= 400) {
+              statusEl.className = 'mirror-status error';
+              statusEl.textContent = (r.body && r.body.error) || 'stop failed';
+            }
+          })
+          .catch(function() { stopBtn.disabled = false; });
       });
     }
 

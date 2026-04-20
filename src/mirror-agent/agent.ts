@@ -700,6 +700,14 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         typeof data.requestId === "string" ? data.requestId : "";
       if (!requestId) return;
       handleListCommands(session, requestId);
+    } else if (data.event === "mirror_stop") {
+      const watcher =
+        typeof data.origin?.watcher === "string"
+          ? data.origin.watcher
+          : "unknown";
+      void handleStop(session, watcher).catch((err: unknown) => {
+        log(`[${session.sid}] stop handler threw: ${String(err)}`);
+      });
     }
   }
 
@@ -749,6 +757,27 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (!session.ws || !session.ws.send(JSON.stringify(frame))) {
       log(`[${session.sid}] failed to send paste ack (hub disconnected)`);
     }
+  }
+
+  /** Handle a hub-initiated stop: send Escape to the session's tmux
+   *  pane, emit an audit event so watchers see it in the transcript. */
+  async function handleStop(
+    session: SessionState,
+    watcher: string,
+  ): Promise<void> {
+    if (!session.tmuxPane) {
+      emitAuditEvent(
+        session,
+        "stop rejected: session is not running inside tmux",
+      );
+      return;
+    }
+    const result = await injector.sendEscape(session.tmuxPane);
+    if (!result.ok) {
+      emitAuditEvent(session, `stop failed (${result.code}): ${result.error}`);
+      return;
+    }
+    emitAuditEvent(session, `stop from ${watcher}: sent Esc`);
   }
 
   /** Respond to a hub-initiated slash-command catalog query. Scans the
