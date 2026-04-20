@@ -363,6 +363,34 @@
   .m-tool-badge.error { background: rgba(247,118,142,0.18); color: var(--red); }
   .m-tool-badge.nosupport { background: rgba(187,154,247,0.15); color: var(--purple); }
 
+  /* Bash command + output */
+  .m-bash-cmd {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .m-bash-cmd-full {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; white-space: pre-wrap; color: var(--text);
+  }
+  .m-bash-out {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.45; white-space: pre-wrap;
+    color: var(--text); margin: 4px 0 0 0;
+    max-height: 320px; overflow: auto;
+  }
+  .m-bash-err {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.45; white-space: pre-wrap;
+    color: var(--red); margin: 4px 0 0 0;
+    max-height: 200px; overflow: auto;
+  }
+  .m-bash-label {
+    font-size: 10px; font-weight: 600; color: var(--red);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    margin-top: 6px;
+  }
+
   /* TodoWrite list — styles live in the later block with .m-checkbox */
 
   /* Diff for Edit/Write */
@@ -1280,17 +1308,85 @@
       },
       Bash: {
         call: function(p, el) {
-          var cmd = p.input && p.input.command;
+          var cmd = (p.input && p.input.command) || '';
           var desc = p.input && p.input.description;
+          var lines = cmd.split('\n');
+          var first = lines[0] || '';
+          var headline = first.length > 120 ? first.slice(0, 117) + '…' : first;
+          if (lines.length > 1) {
+            headline += ' ↵ (' + lines.length + ' lines)';
+          }
           el.innerHTML = makeHeadline('Bash',
-            '<span class="m-tool-target">$ ' + escapeHtml(truncateLines(cmd || '', 1).slice(0, 200)) + '</span>',
+            '<span class="m-bash-cmd">$ ' + escapeHtml(headline) + '</span>',
             desc ? escapeHtml(desc) : null);
+          // Stash the full command (collapsed) when it's multi-line or long.
+          if (lines.length > 1 || cmd.length > 120) {
+            appendDetails(el, 'full command',
+              '<pre class="m-bash-cmd-full">' + escapeHtml(cmd) + '</pre>');
+          }
         },
         result: function(p, el) {
-          var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
-          if (p.is_error) { setStatusError(el); } else { setStatusOk(el, 'exit 0'); }
-          appendDetails(el, 'stdout + stderr', '<pre>' + escapeHtml(truncateLines(resp, 30)) + '</pre>',
-            { open: true });
+          var r = p.response;
+          var stdout = '';
+          var stderr = '';
+          var interrupted = false;
+          // Newer Claude Code wraps bash output as { stdout, stderr, interrupted, ... }.
+          // Older versions return a plain string. Handle both.
+          if (r && typeof r === 'object' && !Array.isArray(r)) {
+            stdout = typeof r.stdout === 'string' ? r.stdout : '';
+            stderr = typeof r.stderr === 'string' ? r.stderr : '';
+            interrupted = !!r.interrupted;
+          } else if (typeof r === 'string') {
+            // Try parsing as JSON first (some transports stringify the object).
+            var parsed = null;
+            try { parsed = JSON.parse(r); } catch (e) { /* not JSON */ }
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              stdout = parsed.stdout || '';
+              stderr = parsed.stderr || '';
+              interrupted = !!parsed.interrupted;
+            } else {
+              stdout = r;
+            }
+          }
+
+          if (p.is_error) {
+            setStatusError(el);
+          } else if (interrupted) {
+            var badge = el.querySelector('[data-role="status"]');
+            if (badge) {
+              badge.className = 'm-tool-badge error';
+              badge.textContent = 'interrupted';
+            }
+          } else {
+            setStatusOk(el, 'done');
+          }
+
+          var outLineCount = stdout ? stdout.trimEnd().split('\n').filter(function(l) { return l.length > 0; }).length : 0;
+          var errLineCount = stderr ? stderr.trimEnd().split('\n').filter(function(l) { return l.length > 0; }).length : 0;
+
+          // Build the details body. stdout + stderr stay COLLAPSED by default —
+          // summary line tells you how much output there was at a glance.
+          var body = '';
+          if (stdout) {
+            body += '<pre class="m-bash-out">' + escapeHtml(truncateLines(stdout, 40)) + '</pre>';
+          }
+          if (stderr) {
+            body += '<div class="m-bash-label">stderr</div>' +
+              '<pre class="m-bash-err">' + escapeHtml(truncateLines(stderr, 20)) + '</pre>';
+          }
+          if (!body) body = '<div class="m-tool-sub">(no output)</div>';
+
+          var summary;
+          if (outLineCount || errLineCount) {
+            var parts = [];
+            if (outLineCount) parts.push(outLineCount + ' line' + (outLineCount === 1 ? '' : 's') + ' stdout');
+            if (errLineCount) parts.push(errLineCount + ' line' + (errLineCount === 1 ? '' : 's') + ' stderr');
+            summary = parts.join(', ');
+          } else {
+            summary = 'output (empty)';
+          }
+
+          appendDetails(el, summary, body);  // collapsed by default
         },
       },
       Edit: {
@@ -1408,8 +1504,8 @@
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'done');
           var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
-          appendDetails(el, 'result', '<pre>' + escapeHtml(truncateLines(resp || '', 30)) + '</pre>',
-            { open: true });
+          appendDetails(el, 'result',
+            '<pre>' + escapeHtml(truncateLines(resp || '', 30)) + '</pre>');
         },
       },
       NotebookEdit: {
@@ -1590,7 +1686,7 @@
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'read');
           var resp = typeof p.response === 'string' ? p.response : tryJson(p.response);
           appendDetails(el, 'output',
-            '<pre>' + escapeHtml(truncateLines(resp, 20)) + '</pre>', { open: true });
+            '<pre>' + escapeHtml(truncateLines(resp, 20)) + '</pre>');
         },
       },
       TaskStop: {
