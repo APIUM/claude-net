@@ -63,6 +63,15 @@ export interface AgentHandle {
 const DEFAULT_IDLE_SHUTDOWN_MS = 30 * 60 * 1000;
 const DEFAULT_SESSION_IDLE_MS = 10 * 60 * 1000;
 const OUTBOX_MAX = 4096;
+const MAX_ASSISTANT_TEXT_BYTES = 256 * 1024;
+
+function clampAssistantText(s: string): { value: string; truncated: boolean } {
+  if (Buffer.byteLength(s, "utf8") <= MAX_ASSISTANT_TEXT_BYTES) {
+    return { value: s, truncated: false };
+  }
+  const buf = Buffer.from(s, "utf8").subarray(0, MAX_ASSISTANT_TEXT_BYTES);
+  return { value: buf.toString("utf8"), truncated: true };
+}
 
 export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const hubUrl = config.hubUrl.replace(/\/+$/, "");
@@ -289,6 +298,16 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
     }
 
+    // Stop / SubagentStop fire at turn end and carry only the FINAL
+    // assistant text block. When the JSONL tail is running for this
+    // session we already emit every text block (including the final
+    // one), so suppress the hook-sourced duplicate. Fall through and
+    // emit when no tail is active — better a degraded stream (only the
+    // final text) than silence.
+    if (ingested.frame.kind === "assistant_message" && session.tail !== null) {
+      return new Response("suppressed-tail-active", { status: 202 });
+    }
+
     // Redact before queueing — keeps sensitive content off the hub WS.
     redactor.redactFrame(ingested.frame);
     queueEvent(session, ingested.frame);
@@ -464,18 +483,82 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (session.tail || !session.transcriptPath) return;
     session.tail = tailJsonl(session.transcriptPath, {
       onRecord: (rec) => {
-        // Reconciliation: we don't emit anything here in M1 — the hook stream
-        // is the primary event source. We only track the JSONL for future
-        // phases (gap detection, restart recovery). Dedupe by uuid so if we
-        // later start emitting from here, duplicates are suppressed.
+        // Track the record's own uuid (dedup against any future uuid
+        // overlaps with the hook stream).
         if (typeof rec.uuid === "string") {
           session.seenUuids.add(rec.uuid);
+        }
+        // Assistant records are the source of truth for assistant text.
+        // The Stop hook only delivers the final text block at end-of-turn,
+        // so anything Claude wrote before/between tool calls would be
+        // missed. The JSONL is written incrementally as Claude generates,
+        // with one content-array per turn holding text + tool_use blocks.
+        if (
+          rec.type === "assistant" &&
+          rec.message &&
+          typeof rec.message === "object"
+        ) {
+          const msg = rec.message as { content?: unknown };
+          const content = Array.isArray(msg.content) ? msg.content : [];
+          for (let i = 0; i < content.length; i++) {
+            const block = content[i] as
+              | { type?: string; text?: string }
+              | undefined;
+            if (
+              block &&
+              block.type === "text" &&
+              typeof block.text === "string" &&
+              block.text.length > 0
+            ) {
+              emitAssistantTextFromJsonl(session, rec, i, block.text);
+            }
+          }
         }
       },
       onError: (err) => {
         log(`[${session.sid}] JSONL tail error: ${err.message}`);
       },
     });
+  }
+
+  /**
+   * Emit a mirror `assistant_message` frame for one text block read out
+   * of the JSONL. The uuid is derived from the record's uuid + block
+   * index so repeated reads of the same record (e.g. on tail restart)
+   * dedup cleanly at `queueEvent`.
+   */
+  function emitAssistantTextFromJsonl(
+    session: SessionState,
+    rec: { uuid?: string; timestamp?: string },
+    blockIndex: number,
+    text: string,
+  ): void {
+    const baseUuid =
+      typeof rec.uuid === "string" && rec.uuid.length > 0
+        ? rec.uuid
+        : crypto.randomUUID();
+    const uuid = `${baseUuid}-text-${blockIndex}`;
+    if (session.seenUuids.has(uuid)) return;
+    const ts =
+      typeof rec.timestamp === "string"
+        ? Date.parse(rec.timestamp)
+        : Number.NaN;
+    const clamped = clampAssistantText(text);
+    const frame: MirrorEventFrame = {
+      action: "mirror_event",
+      sid: session.sid,
+      uuid,
+      kind: "assistant_message",
+      ts: Number.isFinite(ts) ? ts : Date.now(),
+      payload: {
+        kind: "assistant_message",
+        text: clamped.value,
+        stop_reason: "",
+        ...(clamped.truncated ? { truncated: true } : {}),
+      },
+    };
+    redactor.redactFrame(frame);
+    queueEvent(session, frame);
   }
 
   function queueEvent(session: SessionState, frame: MirrorEventFrame): void {
