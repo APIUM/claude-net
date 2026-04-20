@@ -1550,8 +1550,11 @@
             '<span title="' + escapeAttr(fp || '') + '">✎ ' + escapeHtml(shortPath(fp || '')) + '</span>');
           if (oldS || newS) {
             var diff = renderRichDiff(oldS, newS);
+            // Diff details open by default — you almost always want to see
+            // the change inline. Other tool renderers stay collapsed.
             appendDetails(el, diffSummary(diff),
-              '<div class="m-diff-v2">' + diff.html + '</div>');
+              '<div class="m-diff-v2">' + diff.html + '</div>',
+              { open: true });
           }
         },
         result: function(p, el) {
@@ -1572,7 +1575,8 @@
             body += renderDiffLine('add', escapeHtml(lines[i]));
           }
           appendDetails(el, '+' + lines.length + ' / −0',
-            '<div class="m-diff-v2">' + body + '</div>');
+            '<div class="m-diff-v2">' + body + '</div>',
+            { open: true });
         },
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'written');
@@ -1602,7 +1606,7 @@
           }
           var summary = '−' + totalRemoved + ' / +' + totalAdded +
             ' across ' + edits.length + ' edit' + (edits.length === 1 ? '' : 's');
-          appendDetails(el, summary, body);
+          appendDetails(el, summary, body, { open: true });
         },
         result: function(p, el) {
           if (p.is_error) setStatusError(el); else setStatusOk(el, 'saved');
