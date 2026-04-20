@@ -1100,26 +1100,17 @@
     .mirror-compose-hint { display: none; }
   }
 
-  /* Enter-mode toggle: small, subtle button that lives in the actions
-     cluster next to the keyboard-hint. Clicking flips Enter between
-     'send' and 'newline' modes and persists in localStorage. */
-  .mirror-compose-mode {
-    background: transparent;
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    padding: 4px 8px;
-    font-family: var(--font-mono);
-    font-size: 9px;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    cursor: pointer;
-    white-space: nowrap;
-    align-self: center;
-    transition: color 0.1s, border-color 0.1s;
-  }
-  .mirror-compose-mode:hover {
-    color: var(--accent);
-    border-color: var(--accent);
+  /* On touch-primary devices (phones, tablets without a hardware
+     keyboard) the Send button disappears entirely and the textarea
+     frame spans the full bar. Submit happens via a double-Enter
+     (two presses within 500 ms); single Enter inserts a newline. */
+  .mirror-compose.is-touch .mirror-compose-actions { display: none; }
+  .mirror-compose.is-touch .mirror-compose-frame { flex: 1; }
+  .mirror-compose.is-touch .mirror-compose-frame::before {
+    /* Prompt rail stays but shrinks a little to reclaim tap-space. */
+    width: 28px;
+    padding-top: 11px;
+    font-size: 13px;
   }
 
   /* ── Slash-command autocomplete popover ─────────────────────────
@@ -3343,56 +3334,26 @@
 
     // ── Enter-key mode ───────────────────────────────────────────
     // Touch-primary devices (phones, tablets without a hardware
-    // keyboard) have no Shift+Enter available, so Enter-sends becomes
-    // a trap: every newline submits. Default to "enter = newline"
-    // there, and let the user flip it either way via a small toggle
-    // (persisted per-browser in localStorage).
-    var STORAGE_KEY = 'claude-net.mirror.enter-mode';
+    // keyboard) can't Shift+Enter, so Enter-sends turns into a trap.
+    // Instead:
+    //   - Desktop (pointer: fine): Enter sends, Shift+Enter newlines.
+    //     The Transmit button is visible as the explicit affordance.
+    //   - Touch: Enter always inserts a newline; submit is a quick
+    //     double-Enter (two Enter presses within DOUBLE_ENTER_MS).
+    //     Lets you still type blank lines for paragraph breaks as
+    //     long as you pause between them. No on-screen button is
+    //     rendered on mobile — the textarea goes full-width.
     var isTouchPrimary = false;
     try {
       isTouchPrimary = window.matchMedia(
         '(hover: none) and (pointer: coarse)'
       ).matches;
     } catch (e) { /* older browsers — assume desktop */ }
-    // enterMode: 'send' (Enter sends) or 'newline' (Enter = newline).
-    var enterMode = localStorage.getItem(STORAGE_KEY);
-    if (enterMode !== 'send' && enterMode !== 'newline') {
-      enterMode = isTouchPrimary ? 'newline' : 'send';
+    if (composeEl) {
+      if (isTouchPrimary) composeEl.classList.add('is-touch');
     }
-    var hintEl = composeEl && composeEl.querySelector('.mirror-compose-hint');
-    function applyEnterMode() {
-      if (!hintEl) return;
-      if (enterMode === 'newline') {
-        hintEl.innerHTML =
-          '<kbd>tap</kbd> transmit<br>' +
-          '<kbd>↵</kbd> newline';
-      } else {
-        hintEl.innerHTML =
-          '<kbd>↵</kbd> send<br>' +
-          '<kbd>⇧↵</kbd> newline';
-      }
-      if (toggleBtn) {
-        toggleBtn.textContent = enterMode === 'newline' ? '↵ = new line' : '↵ = send';
-        toggleBtn.title = 'Switch to ' + (enterMode === 'newline' ? 'Enter sends' : 'Enter = new line');
-      }
-    }
-    // Small toggle button — tucked into the actions cluster.
-    var actions = composeEl && composeEl.querySelector('.mirror-compose-actions');
-    var toggleBtn = null;
-    if (actions && hintEl) {
-      toggleBtn = document.createElement('button');
-      toggleBtn.type = 'button';
-      toggleBtn.className = 'mirror-compose-mode';
-      toggleBtn.addEventListener('click', function() {
-        enterMode = enterMode === 'newline' ? 'send' : 'newline';
-        try { localStorage.setItem(STORAGE_KEY, enterMode); } catch (e) {}
-        applyEnterMode();
-        composeText.focus();
-      });
-      // Place the toggle before the hint — reading order: toggle, hint, send.
-      actions.insertBefore(toggleBtn, hintEl);
-    }
-    applyEnterMode();
+    var DOUBLE_ENTER_MS = 500;
+    var lastEnterAt = 0;
 
     // ── Slash-command autocomplete ────────────────────────────
     // Fetched once per session load. If the textarea's first line
@@ -3543,13 +3504,24 @@
           }
         }
         if (e.key !== 'Enter') return;
-        if (enterMode === 'newline') {
-          // Shift+Enter still sends in newline mode — inverse of desktop.
-          if (e.shiftKey) { e.preventDefault(); doInject(); }
+        if (isTouchPrimary) {
+          // Touch: double-Enter-within-500ms submits; otherwise newline.
+          // This keeps paragraph breaks possible (pause between Enters)
+          // while giving a keyboard-only path to submit on mobile.
+          var now = Date.now();
+          var isDoubleEnter = now - lastEnterAt < DOUBLE_ENTER_MS;
+          lastEnterAt = now;
+          if (isDoubleEnter) {
+            e.preventDefault();
+            lastEnterAt = 0;
+            // Strip trailing newlines the first Enter inserted.
+            composeText.value = composeText.value.replace(/\n+$/, '');
+            doInject();
+          }
           // else: let the textarea insert the newline naturally.
         } else {
+          // Desktop: Enter sends, Shift+Enter newlines.
           if (!e.shiftKey) { e.preventDefault(); doInject(); }
-          // else: Shift+Enter inserts a newline naturally.
         }
       });
     }
