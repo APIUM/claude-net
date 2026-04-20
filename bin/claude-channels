@@ -248,7 +248,31 @@ start_mirror_agent() {
         return 1
     fi
 
-    local hub_url="${CLAUDE_NET_HUB:-http://localhost:4815}"
+    # Hub URL resolution:
+    #   1. CLAUDE_NET_HUB env var (explicit override)
+    #   2. env.CLAUDE_NET_HUB on any "claude-net" MCP server in ~/.claude.json
+    #      (this is where the plugin already gets its URL, so the mirror-agent
+    #      ends up pointing at the same hub without extra configuration)
+    #   3. http://localhost:4815 as a last-ditch default
+    local hub_url
+    hub_url="${CLAUDE_NET_HUB:-}"
+    if [ -z "$hub_url" ] && [ -f "$HOME/.claude.json" ]; then
+        hub_url=$(CLAUDE_JSON="$HOME/.claude.json" python3 -c "
+import json, os
+try:
+    with open(os.environ['CLAUDE_JSON']) as f:
+        d = json.load(f)
+    for scope in [d.get('mcpServers', {}),
+                  *[p.get('mcpServers', {}) for p in d.get('projects', {}).values()]]:
+        cfg = scope.get('claude-net')
+        if cfg and cfg.get('env', {}).get('CLAUDE_NET_HUB'):
+            print(cfg['env']['CLAUDE_NET_HUB'])
+            break
+except Exception:
+    pass
+" 2>/dev/null)
+    fi
+    hub_url="${hub_url:-http://localhost:4815}"
     mkdir -p /tmp/claude-net 2>/dev/null || true
     local log_file="/tmp/claude-net/mirror-agent-${uid}.log"
     CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 &
