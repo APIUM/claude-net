@@ -163,6 +163,80 @@ The plugin's `instructions` string (injected into Claude's system prompt) covers
 - That messages to offline agents fail (no queuing)
 - That `reply_to` should be set when responding to a specific message
 
+### FR-8: Mirror Sessions (stub — detailed behavior lands with phases M1–M4)
+
+Mirror sessions let a browser on the trust network follow along with a local Claude Code session and (with an owner token) inject new user prompts back into it. Capture is via Claude Code hooks, transported through a local mirror-agent daemon to the hub, and rendered on a new per-session web view.
+
+**FR-8.1: Event kinds**
+
+Each event emitted for a mirror session has one of these kinds:
+- `session_start`, `session_end`
+- `user_prompt`, `assistant_message`
+- `tool_call`, `tool_result`
+- `notification`, `compact`
+
+**FR-8.2: Plugin → Hub frame (outbound mirror events)**
+
+```typescript
+{
+  action: "mirror_event",
+  sid: string,               // Claude Code session UUID
+  uuid: string,              // event UUID (for dedupe with JSONL reconciliation)
+  kind: MirrorEventKind,
+  ts: number,                // epoch ms
+  payload: MirrorEventPayload,  // kind-discriminated
+  requestId?: string
+}
+```
+
+**FR-8.3: Hub → mirror-agent frames (inbound control)**
+
+```typescript
+// Inject a user prompt into the live local session (Phase M2+)
+{
+  event: "mirror_inject",
+  sid: string,
+  text: string,
+  seq: number,
+  origin: { watcher: string, ts: number }
+}
+
+// Pause / resume / close the mirror session from the hub side
+{
+  event: "mirror_control",
+  sid: string,
+  op: "pause" | "resume" | "close"
+}
+```
+
+**FR-8.4: Dashboard events**
+
+The dashboard `/ws/dashboard` channel gains these events:
+- `mirror:session_started`, `mirror:session_ended`
+- `mirror:event` (delivered to per-`sid` subscribers on `/ws/mirror/{sid}`)
+- `mirror:watcher_joined`, `mirror:watcher_left`
+
+**FR-8.5: Tokens**
+
+Each mirror session carries one or more tokens. Each token is `{ value: string (128-bit hex), type: "owner" | "reader", sid, created_at, revoked_at? }`. Tokens are delivered via the URL fragment (`#token=...`) so they are never sent in HTTP `Referer` or landed in hub access logs. Owner tokens authorize read, inject, share, revoke, and close. Reader tokens authorize read only.
+
+**FR-8.6: Public summary model**
+
+```typescript
+// GET /api/mirror/sessions (owner-gated)
+{
+  sid: string,
+  owner_agent: string,
+  cwd: string,
+  created_at: string,
+  last_event_at: string,
+  watcher_count: number,
+  transcript_len: number
+}
+```
+
+Phase M1 implements read-only outbound mirror and the owner token. Phase M2 adds tmux-based injection. Phase M3 adds reader tokens, a redactor, optional disk persistence, optional TLS, and rate limiting. Phase M4 (opt-in) replaces tmux injection with a same-length binary patch. Full per-phase spec lives in `docs/MIRROR_SESSION_IMPLEMENTATION_PLAN.md` and `docs/MIRROR_SESSION_PHASE_{0..4}.md`.
+
 ---
 
 ## Architecture
