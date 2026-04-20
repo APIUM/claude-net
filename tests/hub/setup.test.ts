@@ -61,9 +61,14 @@ describe("Setup endpoint", () => {
     expect(body).toStartWith("#!/bin/bash");
     expect(body).toContain("set -e");
     expect(body).toContain("claude mcp add");
-    expect(body).toContain("CLAUDE_NET_HUB=http://");
+    // hub URL is passed to the plugin via CLAUDE_NET_HUB
+    expect(body).toContain("CLAUDE_NET_HUB=");
+    expect(body).toContain("http://");
     expect(body).toContain("plugin.ts");
     expect(body).toContain("bun run");
+    // new bits added in the full-installer rewrite
+    expect(body).toContain("claude-net-mirror-push");
+    expect(body).toContain(".claude/settings.json");
   });
 
   test("response content-type is text/plain", async () => {

@@ -441,6 +441,20 @@ export class MirrorRegistry {
     return result;
   }
 
+  /**
+   * Return a summary of every active session with the owner token attached.
+   * Used by the hub's internal dashboard (which is on a private trust
+   * network) to build click-through links without requiring the viewer to
+   * re-paste a token. Do NOT expose this endpoint on a public-trust hub.
+   */
+  listAllWithTokens(): Array<MirrorSessionSummary & { owner_token: string }> {
+    const result: Array<MirrorSessionSummary & { owner_token: string }> = [];
+    for (const entry of this.sessions.values()) {
+      result.push({ ...toSummary(entry), owner_token: entry.ownerToken });
+    }
+    return result;
+  }
+
   handleAgentDisconnect(wsIdentity: object): void {
     for (const entry of this.sessions.values()) {
       if (entry.agent && entry.agent.wsIdentity === wsIdentity) {
@@ -568,6 +582,19 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         mirror_url: mirrorUrl,
         restored: result.restored,
       };
+    })
+
+    .get("/sessions/all", ({ request }) => {
+      // All live mirror sessions including owner tokens. Intended for the
+      // hub's internal dashboard on a trusted network — the same trust
+      // posture as the rest of the hub. Do not expose this to a public
+      // dashboard without a further auth layer.
+      const host = resolveMirrorHost(externalHost, port, request);
+      const scheme = schemeFor(request);
+      return mirrorRegistry.listAllWithTokens().map((s) => ({
+        ...s,
+        mirror_url: `${scheme}://${host}/mirror/${s.sid}#token=${s.owner_token}`,
+      }));
     })
 
     .get("/sessions", ({ query, set }) => {

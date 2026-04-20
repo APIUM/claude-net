@@ -1,5 +1,6 @@
 import { Elysia } from "elysia";
 import { apiPlugin } from "./api";
+import { binServerPlugin } from "./bin-server";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
 import { createStoreFromEnv } from "./mirror-store";
 import { Registry } from "./registry";
@@ -70,6 +71,7 @@ let app = new Elysia()
   })
   .use(apiPlugin({ registry, teams, router, startedAt }))
   .use(mirrorPlugin({ mirrorRegistry, externalHost, port }))
+  .use(binServerPlugin({ repoRoot: `${import.meta.dir}/../..` }))
   .use(setupPlugin({ port }));
 
 app = wsPlugin(app, registry, teams, router);

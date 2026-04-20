@@ -350,6 +350,27 @@
 
   .mirror-status { font-size: 11px; padding: 4px 12px; color: var(--text-muted); }
   .mirror-status.error { color: var(--red); }
+
+  /* Mirror sessions list on the main dashboard */
+  .mirror-list-heading {
+    font-size: 11px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    padding: 10px 12px 6px; border-top: 1px solid var(--border); margin-top: 4px;
+  }
+  .mirror-list-empty { padding: 6px 14px 10px; font-size: 12px; color: var(--text-dim); font-style: italic; }
+  .mirror-list-item {
+    display: block; padding: 8px 12px; cursor: pointer; text-decoration: none;
+    color: inherit; border-left: 3px solid transparent;
+  }
+  .mirror-list-item:hover { background: var(--bg-hover); border-left-color: var(--blue); }
+  .mirror-list-item .mli-owner { font-size: 13px; color: var(--text); }
+  .mirror-list-item .mli-cwd { font-size: 11px; color: var(--text-muted); font-family: monospace; margin-top: 2px; }
+  .mirror-list-item .mli-meta {
+    display: flex; gap: 10px; font-size: 10px; color: var(--text-dim); margin-top: 3px;
+  }
+  .mirror-list-item .mli-watchers {
+    color: var(--green); font-weight: 600;
+  }
 </style>
 </head>
 <body>
@@ -368,6 +389,8 @@
   <div class="panel sidebar">
     <div class="panel-header">Agents</div>
     <div class="panel-body" id="agent-list"></div>
+    <div class="mirror-list-heading">Mirror sessions</div>
+    <div id="mirror-session-list"></div>
   </div>
 
   <div class="panel feed">
@@ -442,6 +465,10 @@
   const sendBtn = document.getElementById('send-btn');
   const sendError = document.getElementById('send-error');
   const toSuggestions = document.getElementById('to-suggestions');
+  const mirrorListEl = document.getElementById('mirror-session-list');
+
+  // Active mirror sessions (full entries with owner_token for click-through).
+  const mirrorSessions = new Map(); // sid -> entry
 
   // --- WebSocket ---
   let ws = null;
@@ -454,6 +481,7 @@
     ws.onopen = function() {
       setConnected(true);
       if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+      refreshMirrorSessions();
     };
 
     ws.onmessage = function(e) {
@@ -522,9 +550,98 @@
         renderTeams();
         updateSuggestions();
         break;
+
+      case 'mirror:session_started':
+        // Partial info from the event; fetch full session (with token + URL).
+        refreshMirrorSessions();
+        break;
+
+      case 'mirror:session_ended':
+        mirrorSessions.delete(event.sid);
+        renderMirrorSessions();
+        break;
+
+      case 'mirror:watcher_joined':
+      case 'mirror:watcher_left': {
+        const entry = mirrorSessions.get(event.sid);
+        if (entry) {
+          entry.watcher_count = (entry.watcher_count || 0) +
+            (event.event === 'mirror:watcher_joined' ? 1 : -1);
+          if (entry.watcher_count < 0) entry.watcher_count = 0;
+          renderMirrorSessions();
+        }
+        break;
+      }
+
+      case 'mirror:event': {
+        const entry = mirrorSessions.get(event.sid);
+        if (entry) {
+          entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
+          entry.transcript_len = (entry.transcript_len || 0) + 1;
+          renderMirrorSessions();
+        }
+        break;
+      }
     }
 
     updateCounts();
+  }
+
+  // --- Mirror sessions (dashboard panel) ---
+  function refreshMirrorSessions() {
+    fetch('/api/mirror/sessions/all')
+      .then(function(r) { return r.ok ? r.json() : []; })
+      .then(function(list) {
+        mirrorSessions.clear();
+        if (Array.isArray(list)) {
+          for (var i = 0; i < list.length; i++) {
+            mirrorSessions.set(list[i].sid, list[i]);
+          }
+        }
+        renderMirrorSessions();
+      })
+      .catch(function() { /* ignore */ });
+  }
+
+  function renderMirrorSessions() {
+    if (!mirrorListEl) return;
+    var entries = Array.from(mirrorSessions.values())
+      .sort(function(a, b) { return b.last_event_at.localeCompare(a.last_event_at); });
+    if (entries.length === 0) {
+      mirrorListEl.innerHTML = '<div class="mirror-list-empty">no active mirrors</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i];
+      var age = relativeTime(e.last_event_at);
+      var watchers = (e.watcher_count || 0) > 0
+        ? '<span class="mli-watchers">' + e.watcher_count + ' watching</span>'
+        : '';
+      html +=
+        '<a class="mirror-list-item" href="' + escapeAttr(e.mirror_url) + '" target="_blank" rel="noopener">' +
+          '<div class="mli-owner">' + escapeHtml(e.owner_agent) + '</div>' +
+          '<div class="mli-cwd">' + escapeHtml(e.cwd || '') + '</div>' +
+          '<div class="mli-meta">' +
+            '<span>' + (e.transcript_len || 0) + ' events</span>' +
+            '<span>' + age + '</span>' +
+            watchers +
+          '</div>' +
+        '</a>';
+    }
+    mirrorListEl.innerHTML = html;
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return '';
+    var t = new Date(iso).getTime();
+    if (!isFinite(t)) return '';
+    var dt = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (dt < 10) return 'just now';
+    if (dt < 60) return dt + 's ago';
+    if (dt < 3600) return Math.floor(dt / 60) + 'm ago';
+    if (dt < 86400) return Math.floor(dt / 3600) + 'h ago';
+    return Math.floor(dt / 86400) + 'd ago';
   }
 
   // --- Render agents ---

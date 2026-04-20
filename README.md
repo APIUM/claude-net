@@ -29,14 +29,18 @@ The fastest way to see it work. Run the hub and a session on the same box.
 # 1. Start the hub
 docker run -d -p 4815:4815 ghcr.io/apium/claude-net
 
-# 2. Register the MCP server (user-wide)
+# 2. Install everything — binaries, MCP server registration, mirror hooks
 curl http://localhost:4815/setup | bash
 
-# 3. Start Claude Code with channels enabled
-claude --dangerously-load-development-channels server:claude-net
+# 3. Start Claude Code (via claude-channels for patched channel support)
+claude-channels
 ```
 
+One `curl` does the whole install: downloads `claude-channels` + mirror binaries from the hub to `~/.local/bin/`, registers the claude-net MCP server with Claude Code, merges mirror hooks into `~/.claude/settings.json` (with a backup). Running it twice is safe — everything is idempotent.
+
 On startup you should see a `<channel>` tag from `hub@claude-net` confirming the round-trip is working. The session auto-registers as `session:user@host` where session is the current folder, user is `$USER`, host is `$HOSTNAME`. Then just talk to it: "send a message to X saying Y" or "list the agents".
+
+Mirror is off by default even after install — enable it by adding `{"claudeNet": {"mirror": {"enabled": true}}}` to `~/.claude/settings.json`, then relaunch `claude-channels`. Details in the Mirror Sessions section below.
 
 ## Team deployment
 
