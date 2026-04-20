@@ -651,22 +651,40 @@
   .m-evt-assistant .m-label { color: var(--accent); }
 
   @media (max-width: 700px) {
-    .mirror-transcript::before { left: 74px; }
-    .m-evt { padding-left: 96px; padding-right: 14px; }
-    .m-evt::before { left: 4px; width: 66px; font-size: 9px; }
-    .m-evt::after { left: 71px; }
-    .m-evt-user { padding-left: 96px; align-items: stretch; }
-    .m-evt-user > pre { max-width: none; }
-    .m-evt-assistant {
-      padding-left: 108px;
-      background-image: linear-gradient(
-        to right,
-        transparent 0, transparent 89px,
-        var(--border) 89px, var(--border) 90px,
-        transparent 90px
-      );
+    /* Narrow screens: the left timeline gutter eats too much width,
+       so we collapse it. Each event's timestamp moves to a small
+       line above the content, and the vertical rail + tick marks
+       are dropped. Assistant messages keep a thin accent left-edge
+       as their anchor. */
+    .mirror-transcript::before { display: none; }
+
+    .m-evt {
+      padding-left: 14px;
+      padding-right: 14px;
     }
-    .m-evt-notif { padding-left: 96px; }
+    .m-evt::before {
+      position: static;
+      display: block;
+      width: auto;
+      text-align: left;
+      margin-bottom: 3px;
+      font-size: 9px;
+    }
+    .m-evt::after { display: none; }
+
+    .m-evt-user { padding-left: 14px; align-items: stretch; }
+    .m-evt-user > pre { max-width: none; }
+    .m-evt-user .m-label { text-align: left; }
+
+    .m-evt-assistant {
+      padding-left: 12px;
+      background-image: none;
+      border-left: 2px solid var(--accent);
+    }
+
+    .m-evt-notif {
+      padding-left: 14px;
+    }
   }
 
   /* ── TOOL CALLS: each one is a rectangular status row. No
