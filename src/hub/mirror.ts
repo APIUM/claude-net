@@ -108,10 +108,17 @@ export class MirrorRegistry {
         };
       }
       if (existing.closedAt) {
-        return {
-          ok: false,
-          error: `Session '${actualSid}' is closed; create a new session.`,
-        };
+        // Re-open a closed session when the same owner comes back with
+        // the same sid. Happens after mirror-agent restarts where the
+        // old agent's shutdown sent a /close before the new agent had
+        // the chance to reclaim the session. Preserving sid keeps the
+        // transcript continuous; we just clear closedAt and cancel the
+        // retention timer (if scheduled).
+        existing.closedAt = null;
+        if (existing.retentionTimerId) {
+          clearTimeout(existing.retentionTimerId);
+          existing.retentionTimerId = null;
+        }
       }
       return {
         ok: true,

@@ -907,7 +907,7 @@
         ? '<span class="mli-watchers">' + e.watcher_count + ' watching</span>'
         : '';
       html +=
-        '<a class="mirror-list-item" href="' + escapeAttr(e.mirror_url) + '" target="_blank" rel="noopener">' +
+        '<a class="mirror-list-item" href="' + escapeAttr(e.mirror_url) + '">' +
           '<div class="mli-owner">' + escapeHtml(e.owner_agent) + '</div>' +
           '<div class="mli-cwd">' + escapeHtml(e.cwd || '') + '</div>' +
           '<div class="mli-meta">' +
