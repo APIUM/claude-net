@@ -549,6 +549,46 @@ const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: "mirror_status",
+    description:
+      "Report whether mirror-session is enabled for this claude process. Returns { enabled, mirror_url?, owner_agent?, watcher_count?, last_event_age_ms?, connected? }.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "mirror_url",
+    description:
+      "Return the mirror URL for this claude session if mirroring is active. Includes the owner token; treat as secret.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "mirror_on",
+    description:
+      "Check whether mirror-session is enabled and return the mirror URL. If hooks are not installed in settings, returns instructions for enabling them.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "mirror_off",
+    description:
+      "Ask the local mirror-agent to close this claude session's mirror stream. Does not remove the hooks; a new session on this cwd would re-enable mirroring unless the settings toggle is flipped.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 // ── Tool dispatch ─────────────────────────────────────────────────────────
@@ -566,6 +606,154 @@ function toolResult(data: unknown) {
   };
 }
 
+// ── Mirror-agent bridge (loopback HTTP) ───────────────────────────────────
+
+const MIRROR_STATE_DIR = "/tmp/claude-net";
+const MIRROR_FETCH_TIMEOUT_MS = 2_000;
+
+interface MirrorAgentSession {
+  sid: string;
+  owner_agent: string;
+  cwd: string;
+  mirror_url: string | null;
+  last_event_at: string;
+  closed: boolean;
+}
+
+function readMirrorAgentPort(): number | null {
+  try {
+    const uid =
+      (process as NodeJS.Process & { getuid?: () => number }).getuid?.() ?? 0;
+    const portFile = path.join(MIRROR_STATE_DIR, `mirror-agent-${uid}.port`);
+    const content = fs.readFileSync(portFile, "utf8").trim();
+    const n = Number.parseInt(content, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+async function mirrorAgentFetch(
+  path: string,
+  init?: RequestInit,
+): Promise<Response | null> {
+  const port = readMirrorAgentPort();
+  if (!port) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MIRROR_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(`http://127.0.0.1:${port}${path}`, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function findOurMirrorSession(): Promise<MirrorAgentSession | null> {
+  const res = await mirrorAgentFetch("/sessions");
+  if (!res || !res.ok) return null;
+  const sessions = (await res.json().catch(() => null)) as
+    | MirrorAgentSession[]
+    | null;
+  if (!Array.isArray(sessions)) return null;
+  // Match by owner_agent (our claude-net name), falling back to cwd match.
+  const ourName = registeredName || storedName;
+  const cwd = process.cwd();
+  return (
+    sessions.find((s) => s.owner_agent === ourName && !s.closed) ??
+    sessions.find((s) => s.cwd === cwd && !s.closed) ??
+    null
+  );
+}
+
+async function handleMirrorTool(name: string): Promise<{
+  isError?: boolean;
+  content: { type: "text"; text: string }[];
+}> {
+  const port = readMirrorAgentPort();
+
+  if (name === "mirror_status") {
+    if (!port) {
+      return toolResult({
+        enabled: false,
+        reason:
+          "mirror-agent is not running. Launch claude-channels with claudeNet.mirror.enabled=true in ~/.claude/settings.json.",
+      });
+    }
+    const session = await findOurMirrorSession();
+    if (!session) {
+      return toolResult({
+        enabled: true,
+        connected: true,
+        reason:
+          "mirror-agent is running but no mirror session is active for this claude process yet. Events appear on the first hook firing.",
+      });
+    }
+    const ageMs = Date.now() - new Date(session.last_event_at).getTime();
+    return toolResult({
+      enabled: true,
+      connected: true,
+      sid: session.sid,
+      owner_agent: session.owner_agent,
+      mirror_url: session.mirror_url,
+      last_event_age_ms: ageMs,
+    });
+  }
+
+  if (name === "mirror_url" || name === "mirror_on") {
+    if (!port) {
+      return notConnectedError(
+        "mirror-agent is not running. Enable with claudeNet.mirror.enabled=true in ~/.claude/settings.json and restart claude-channels.",
+      );
+    }
+    const session = await findOurMirrorSession();
+    if (!session) {
+      return toolResult({
+        enabled: true,
+        pending: true,
+        message:
+          "mirror-agent is running but this claude process has not yet emitted a hook event. Send a message or run a tool; the mirror URL will be available after the next hook fires.",
+      });
+    }
+    return toolResult({
+      mirror_url: session.mirror_url,
+      sid: session.sid,
+    });
+  }
+
+  if (name === "mirror_off") {
+    if (!port) {
+      return toolResult({
+        stopped: false,
+        reason: "mirror-agent is not running",
+      });
+    }
+    const session = await findOurMirrorSession();
+    if (!session) {
+      return toolResult({
+        stopped: false,
+        reason: "no active mirror session for this process",
+      });
+    }
+    // Ask the hub to close via the token we'd normally hold — but the plugin
+    // doesn't have the token (only the mirror-agent does). Instead, use the
+    // mirror-agent's session list → no close endpoint yet. For M1, we return
+    // guidance; M3 will add an authenticated `POST /close` on the mirror-agent
+    // that forwards to the hub with the stored token.
+    return toolResult({
+      stopped: false,
+      reason:
+        "mirror_off is not yet implemented (Phase M3 adds mirror-agent-side close). To stop mirroring, disable claudeNet.mirror.enabled in settings and restart.",
+    });
+  }
+
+  return notConnectedError(`Unknown mirror tool: ${name}`);
+}
+
 async function handleToolCall(
   name: string,
   args: Record<string, string>,
@@ -581,6 +769,12 @@ async function handleToolCall(
       );
     }
     return toolResult({ name: registeredName });
+  }
+
+  // Mirror tools talk to the local mirror-agent daemon via loopback.
+  // They are independent of the hub WebSocket connection.
+  if (name.startsWith("mirror_")) {
+    return handleMirrorTool(name);
   }
 
   if (!hubWsUrl) {

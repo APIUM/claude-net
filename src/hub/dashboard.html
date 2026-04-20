@@ -278,10 +278,63 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* Mirror-session view (path /mirror/:sid) */
+  #mirror-root { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  body.mirror-mode #dashboard-root { display: none; }
+  body.mirror-mode #mirror-root { display: flex; }
+
+  .mirror-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
+    background: var(--bg-surface);
+  }
+  .mirror-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .mirror-title .sid { color: var(--text-muted); font-family: monospace; margin-left: 8px; }
+  .mirror-meta { display: flex; gap: 14px; font-size: 12px; color: var(--text-muted); margin-left: auto; }
+  .mirror-meta span { white-space: nowrap; }
+  .mirror-meta .cwd { font-family: monospace; }
+
+  .mirror-transcript {
+    flex: 1; overflow-y: auto;
+    padding: 16px 24px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .m-evt { max-width: 78ch; word-wrap: break-word; font-size: 13px; line-height: 1.45; }
+  .m-evt pre { white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .m-evt-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+
+  .m-evt-user { align-self: stretch; padding: 10px 12px; background: rgba(122,162,247,0.10); border-left: 3px solid var(--blue); border-radius: 4px; }
+  .m-evt-user .m-label { color: var(--blue); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .m-evt-assistant { align-self: stretch; padding: 10px 12px; background: rgba(158,206,106,0.08); border-left: 3px solid var(--green); border-radius: 4px; }
+  .m-evt-assistant .m-label { color: var(--green); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  .m-evt-tool { align-self: stretch; padding: 8px 12px; background: var(--bg-surface); border-left: 3px solid var(--cyan); border-radius: 4px; }
+  .m-evt-tool .m-label { color: var(--cyan); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .m-evt-tool details { margin-top: 4px; }
+  .m-evt-tool summary { cursor: pointer; color: var(--text-muted); font-size: 12px; user-select: none; }
+  .m-evt-tool .m-tool-result { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); }
+  .m-evt-tool.is-error { border-left-color: var(--red); }
+
+  .m-evt-notif { align-self: center; color: var(--text-muted); font-style: italic; font-size: 12px; }
+  .m-evt-compact { align-self: center; color: var(--text-dim); font-size: 12px; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); padding: 4px 12px; }
+  .m-evt-end { align-self: center; color: var(--orange); font-size: 12px; font-weight: 600; }
+  .m-truncated { color: var(--orange); font-size: 11px; margin-left: 6px; }
+
+  .mirror-compose {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 12px 24px; background: var(--bg-surface); border-top: 1px solid var(--border);
+  }
+  .mirror-compose.compose-hidden { display: none; }
+  .mirror-compose-note { font-size: 12px; color: var(--text-muted); padding: 6px 0; }
+
+  .mirror-status { font-size: 11px; padding: 4px 12px; color: var(--text-muted); }
+  .mirror-status.error { color: var(--red); }
 </style>
 </head>
 <body>
 
+<div id="dashboard-root">
 <header>
   <h1>claude-net</h1>
   <div class="header-stats">
@@ -316,12 +369,37 @@
   <button id="send-btn">Send</button>
   <span class="send-error" id="send-error"></span>
 </div>
+</div>
+
+<div id="mirror-root">
+  <header class="mirror-header">
+    <div class="mirror-title">mirror session<span class="sid" id="mirror-sid"></span></div>
+    <div class="mirror-meta">
+      <span class="cwd" id="mirror-cwd"></span>
+      <span id="mirror-owner"></span>
+      <span id="mirror-conn">connecting…</span>
+    </div>
+  </header>
+  <div class="mirror-status" id="mirror-status"></div>
+  <div class="mirror-transcript" id="mirror-transcript"></div>
+  <div class="mirror-compose compose-hidden" id="mirror-compose">
+    <div class="mirror-compose-note">Inject from this view is disabled in this build (Phase M2 adds tmux-based injection).</div>
+  </div>
+</div>
 
 <script>
 (function() {
   'use strict';
 
-  // --- State ---
+  // --- Router: dashboard (default) vs mirror view (/mirror/:sid) ---
+  var mirrorMatch = location.pathname.match(/^\/mirror\/([^/]+)\/?$/);
+  if (mirrorMatch) {
+    document.body.classList.add('mirror-mode');
+    startMirror(decodeURIComponent(mirrorMatch[1]));
+    return;
+  }
+
+  // --- Dashboard state ---
   const agents = new Map(); // fullName -> { name, fullName, status }
   const teams = new Map();  // teamName -> { members: string[] }
   const messages = [];       // { from, to, type, content, team?, timestamp, routeType }
@@ -629,6 +707,164 @@
   // --- Init ---
   connect();
   updateCounts();
+
+  // ── Mirror view (scoped within the outer IIFE so helpers are in scope) ─
+  function startMirror(sid) {
+    var token = '';
+    var hash = location.hash || '';
+    var m = hash.match(/(?:^#|&)token=([^&]+)/);
+    if (m) token = decodeURIComponent(m[1]);
+
+    var sidEl = document.getElementById('mirror-sid');
+    var cwdEl = document.getElementById('mirror-cwd');
+    var ownerEl = document.getElementById('mirror-owner');
+    var connEl = document.getElementById('mirror-conn');
+    var statusEl = document.getElementById('mirror-status');
+    var transcriptEl = document.getElementById('mirror-transcript');
+
+    sidEl.textContent = sid;
+    connEl.textContent = 'connecting…';
+
+    if (!token) {
+      statusEl.className = 'mirror-status error';
+      statusEl.textContent = 'Missing token in URL fragment. Paste the full mirror URL (including #token=...).';
+      connEl.textContent = 'unauthenticated';
+      return;
+    }
+
+    var rendered = Object.create(null); // uuid → true
+    var autoscroll = true;
+
+    transcriptEl.addEventListener('scroll', function() {
+      var nearBottom =
+        transcriptEl.scrollTop + transcriptEl.clientHeight >=
+        transcriptEl.scrollHeight - 24;
+      autoscroll = nearBottom;
+    });
+
+    function renderEvent(evt) {
+      if (!evt || !evt.uuid || rendered[evt.uuid]) return;
+      rendered[evt.uuid] = true;
+
+      var kind = evt.kind;
+      var payload = evt.payload || {};
+      var el = document.createElement('div');
+      el.className = 'm-evt m-evt-' + kind;
+
+      if (kind === 'user_prompt') {
+        el.innerHTML =
+          '<div class="m-evt-meta"><span class="m-label">user</span> ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
+          '<pre>' + escapeHtml(payload.prompt || '') + '</pre>' +
+          (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+      } else if (kind === 'assistant_message') {
+        el.innerHTML =
+          '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
+          '<pre>' + escapeHtml(payload.text || '') + '</pre>' +
+          (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
+      } else if (kind === 'tool_call') {
+        var inputStr = tryJson(payload.input);
+        el.innerHTML =
+          '<div class="m-evt-meta"><span class="m-label">tool</span> ' + escapeHtml(payload.tool_name || '') + ' ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
+          '<details><summary>input</summary><pre>' + escapeHtml(inputStr) + '</pre></details>';
+        el.setAttribute('data-tool-use-id', payload.tool_use_id || '');
+      } else if (kind === 'tool_result') {
+        // Try to attach to the matching tool_call card if present.
+        var existing = payload.tool_use_id
+          ? transcriptEl.querySelector('[data-tool-use-id="' + cssEscape(payload.tool_use_id) + '"]')
+          : null;
+        var responseStr = tryJson(payload.response);
+        if (existing) {
+          if (payload.is_error) existing.classList.add('is-error');
+          var res = document.createElement('div');
+          res.className = 'm-tool-result';
+          res.innerHTML = '<details open><summary>result' + (payload.is_error ? ' (error)' : '') + '</summary><pre>' + escapeHtml(responseStr) + '</pre></details>';
+          existing.appendChild(res);
+          return; // no new event card
+        }
+        el.className = 'm-evt m-evt-tool' + (payload.is_error ? ' is-error' : '');
+        el.innerHTML =
+          '<div class="m-evt-meta"><span class="m-label">tool result</span> ' + escapeHtml(payload.tool_name || '') + ' ' + formatTime(new Date(evt.ts).toISOString()) + '</div>' +
+          '<details open><summary>result' + (payload.is_error ? ' (error)' : '') + '</summary><pre>' + escapeHtml(responseStr) + '</pre></details>';
+      } else if (kind === 'notification') {
+        el.innerHTML = escapeHtml(payload.text || '');
+      } else if (kind === 'compact') {
+        el.innerHTML = '— conversation ' + (payload.phase === 'pre' ? 'compacting' : 'compacted') + ' —';
+      } else if (kind === 'session_start') {
+        el.innerHTML = '— session started (' + escapeHtml(payload.source || '') + ') —';
+      } else if (kind === 'session_end') {
+        el.className = 'm-evt m-evt-end';
+        el.innerHTML = '— session ended (' + escapeHtml(payload.reason || '') + ') —';
+      } else {
+        el.innerHTML = '<pre>' + escapeHtml(JSON.stringify(evt)) + '</pre>';
+      }
+
+      transcriptEl.appendChild(el);
+      if (autoscroll) {
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+    }
+
+    function applyInit(msg) {
+      cwdEl.textContent = msg.cwd || '';
+      ownerEl.textContent = msg.owner_agent || '';
+      connEl.textContent = 'connected';
+      if (msg.closed_at) {
+        statusEl.className = 'mirror-status';
+        statusEl.textContent = 'session closed at ' + msg.closed_at;
+      }
+      transcriptEl.innerHTML = '';
+      rendered = Object.create(null);
+      if (Array.isArray(msg.transcript)) {
+        for (var i = 0; i < msg.transcript.length; i++) {
+          renderEvent(msg.transcript[i]);
+        }
+      }
+    }
+
+    var mws = null;
+    var mReconnectTimer = null;
+    function mConnect() {
+      var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var url = proto + '//' + location.host + '/ws/mirror/' + encodeURIComponent(sid) + '?t=' + encodeURIComponent(token);
+      try {
+        mws = new WebSocket(url);
+      } catch (e) {
+        connEl.textContent = 'error';
+        statusEl.className = 'mirror-status error';
+        statusEl.textContent = 'Failed to open WebSocket: ' + (e && e.message ? e.message : e);
+        return;
+      }
+      mws.onopen = function() { connEl.textContent = 'connected'; statusEl.textContent = ''; statusEl.className = 'mirror-status'; };
+      mws.onmessage = function(e) {
+        var msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.event === 'mirror:init') applyInit(msg);
+        else if (msg.event === 'mirror:event') renderEvent(msg);
+        else if (msg.event === 'error') {
+          statusEl.className = 'mirror-status error';
+          statusEl.textContent = msg.message || 'error';
+        }
+      };
+      mws.onclose = function() {
+        connEl.textContent = 'disconnected';
+        if (mReconnectTimer) return;
+        mReconnectTimer = setTimeout(function() { mReconnectTimer = null; mConnect(); }, 3000);
+      };
+      mws.onerror = function() { /* close will follow */ };
+    }
+    mConnect();
+  }
+
+  function tryJson(v) {
+    if (typeof v === 'string') return v;
+    try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+  }
+
+  function cssEscape(s) {
+    return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) {
+      return '\\' + c;
+    });
+  }
 })();
 </script>
 </body>

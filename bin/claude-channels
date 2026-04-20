@@ -159,4 +159,123 @@ if ! $already_has_channels; then
     [ ${#CHANNEL_ARGS[@]} -gt 0 ] && EXTRA_ARGS+=(--dangerously-load-development-channels "${CHANNEL_ARGS[@]}")
 fi
 
+# ── Mirror-session daemon (auto-start if enabled) ────────────────────────
+# Reads `claudeNet.mirror.enabled` from ~/.claude/settings.json. If enabled:
+#   1. Starts the mirror-agent daemon in the background (idempotent — the
+#      agent itself detects an existing instance via its port file).
+#   2. Prints a one-time instruction block if the mirror hooks aren't in
+#      settings.json yet (hooks must be configured by the user; the
+#      launcher does not mutate settings.json).
+
+mirror_enabled() {
+    local config="$HOME/.claude/settings.json"
+    [ -f "$config" ] || return 1
+    python3 -c "
+import json, sys
+try:
+    with open('$config') as f:
+        d = json.load(f)
+    v = d.get('claudeNet', {}).get('mirror', {}).get('enabled', False)
+    sys.exit(0 if v else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null
+}
+
+mirror_hooks_installed() {
+    local config="$HOME/.claude/settings.json"
+    [ -f "$config" ] || return 1
+    python3 -c "
+import json
+try:
+    with open('$config') as f:
+        d = json.load(f)
+    hooks = d.get('hooks', {})
+    # Look for claude-net-mirror-push in any hook event.
+    import json as _j
+    blob = _j.dumps(hooks)
+    exit(0 if 'claude-net-mirror-push' in blob else 1)
+except Exception:
+    exit(1)
+" 2>/dev/null
+}
+
+start_mirror_agent() {
+    local uid port_file
+    uid="$(id -u)"
+    port_file="/tmp/claude-net/mirror-agent-${uid}.port"
+
+    # Already running?
+    if [ -f "$port_file" ]; then
+        local port
+        port=$(cat "$port_file" 2>/dev/null || true)
+        if [ -n "$port" ]; then
+            if curl -fsS -m 1 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+                return 0
+            fi
+            # Stale port file; remove and start fresh.
+            rm -f "$port_file" 2>/dev/null || true
+        fi
+    fi
+
+    local agent_bin
+    agent_bin="$(cd "$(dirname "$SELF")" && pwd)/claude-net-mirror-agent"
+    if [ ! -x "$agent_bin" ]; then
+        # Try the installed location.
+        agent_bin="$HOME/.local/bin/claude-net-mirror-agent"
+    fi
+    if [ ! -x "$agent_bin" ]; then
+        echo "[claude-net/mirror] mirror-agent binary not found; skipping" >&2
+        return 1
+    fi
+
+    local hub_url="${CLAUDE_NET_HUB:-http://localhost:4815}"
+    mkdir -p /tmp/claude-net 2>/dev/null || true
+    local log_file="/tmp/claude-net/mirror-agent-${uid}.log"
+    CLAUDE_NET_HUB="$hub_url" nohup "$agent_bin" >"$log_file" 2>&1 &
+    disown $! 2>/dev/null || true
+
+    # Wait briefly for the port file to appear.
+    local i=0
+    while [ $i -lt 30 ] && [ ! -f "$port_file" ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+}
+
+print_mirror_hook_instructions() {
+    local push_bin
+    push_bin="$(cd "$(dirname "$SELF")" && pwd)/claude-net-mirror-push"
+    if [ ! -x "$push_bin" ]; then
+        push_bin="$HOME/.local/bin/claude-net-mirror-push"
+    fi
+    cat >&2 <<MIRROR_HOOKS
+[claude-net/mirror] mirror is enabled but hook commands are not installed in
+~/.claude/settings.json. Paste the following "hooks" block into your settings
+to start mirroring (merge with any existing "hooks" entry):
+
+  "hooks": {
+    "SessionStart":    [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "UserPromptSubmit":[{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "PreToolUse":      [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "PostToolUse":     [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "Stop":            [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "SubagentStop":    [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "Notification":    [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "PreCompact":      [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }],
+    "PostCompact":     [{ "hooks": [{ "type": "command", "command": "${push_bin}", "timeout": 1 }] }]
+  }
+
+After saving settings.json, restart claude-channels. This block is pasted
+exactly once; subsequent launches are silent.
+MIRROR_HOOKS
+}
+
+if mirror_enabled; then
+    start_mirror_agent || true
+    if ! mirror_hooks_installed; then
+        print_mirror_hook_instructions
+    fi
+fi
+
 exec "$PATCHED_LINK" "${EXTRA_ARGS[@]}" "$@"

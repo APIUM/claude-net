@@ -23,16 +23,42 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/claude-channels" ] && [ -f "$SCRIPT
     echo "Installing from local clone..."
     cp "$SCRIPT_DIR/claude-channels" "$INSTALL_DIR/claude-channels"
     cp "$SCRIPT_DIR/patch-binary.py" "$INSTALL_DIR/patch-binary.py"
+    # Mirror-session components (optional; used when claudeNet.mirror.enabled=true).
+    if [ -f "$SCRIPT_DIR/claude-net-mirror-push" ]; then
+        cp "$SCRIPT_DIR/claude-net-mirror-push" "$INSTALL_DIR/claude-net-mirror-push"
+    fi
+    if [ -f "$SCRIPT_DIR/claude-net-mirror-agent" ]; then
+        cp "$SCRIPT_DIR/claude-net-mirror-agent" "$INSTALL_DIR/claude-net-mirror-agent"
+    fi
+    # Bundle the mirror-agent TS tree if present, so the installed launcher
+    # doesn't need the source tree alongside.
+    if [ -f "$SCRIPT_DIR/../src/mirror-agent/agent.ts" ] && command -v bun >/dev/null 2>&1; then
+        echo "Bundling mirror-agent..."
+        if ! bun build --target=bun \
+            "$SCRIPT_DIR/../src/mirror-agent/agent.ts" \
+            --outfile "$INSTALL_DIR/mirror-agent.bundle.js" 2>/dev/null; then
+            echo "WARN: mirror-agent bundle failed; mirror feature will only work from the repo clone" >&2
+        fi
+    fi
 else
     echo "Downloading from GitHub..."
     curl -fsSL "$REPO_RAW/claude-channels" -o "$INSTALL_DIR/claude-channels"
     curl -fsSL "$REPO_RAW/patch-binary.py" -o "$INSTALL_DIR/patch-binary.py"
+    # Mirror-session components. No bundle in the remote install path yet;
+    # this is shipped in Phase M3 (CI produces an artifact). For now, the
+    # mirror feature is dev-clone only for remote installs.
+    curl -fsSL "$REPO_RAW/claude-net-mirror-push" -o "$INSTALL_DIR/claude-net-mirror-push" 2>/dev/null || true
+    curl -fsSL "$REPO_RAW/claude-net-mirror-agent" -o "$INSTALL_DIR/claude-net-mirror-agent" 2>/dev/null || true
 fi
 
 chmod +x "$INSTALL_DIR/claude-channels"
+[ -f "$INSTALL_DIR/claude-net-mirror-push" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-push"
+[ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && chmod +x "$INSTALL_DIR/claude-net-mirror-agent"
 
 # Symlink to PATH
 ln -snf "$INSTALL_DIR/claude-channels" "$BIN_DIR/claude-channels"
+[ -f "$INSTALL_DIR/claude-net-mirror-push" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-push" "$BIN_DIR/claude-net-mirror-push"
+[ -f "$INSTALL_DIR/claude-net-mirror-agent" ] && ln -snf "$INSTALL_DIR/claude-net-mirror-agent" "$BIN_DIR/claude-net-mirror-agent"
 
 echo ""
 echo "Installed claude-channels to $BIN_DIR/claude-channels"

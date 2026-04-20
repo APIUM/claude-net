@@ -127,6 +127,27 @@ curl -fsSL https://raw.githubusercontent.com/andrewleech/claude-net/main/bin/ins
 
 Wraps to multiple lines on narrow terminals (reads width via `/dev/tty`).
 
+## Mirror sessions (follow & continue a chat from another device)
+
+With mirror-session turned on, every Claude Code session launched via `claude-channels` streams its conversation to the hub's web UI. Open the mirror URL in a browser on the trust network to watch the session live (user prompts, assistant messages, tool calls + results). Tmux-based remote injection arrives in the next milestone; M1 ships read-only.
+
+Enable once in `~/.claude/settings.json`:
+
+```json
+{
+  "claudeNet": { "mirror": { "enabled": true } }
+}
+```
+
+On the next `claude-channels` launch, the launcher starts the local mirror-agent daemon (127.0.0.1 only) and, if hooks aren't yet installed, prints the hook block you need to paste into the same `settings.json`. Once the hooks are in place, every session auto-appears at `http://<hub>:4815/mirror/<sid>#token=<owner-token>`. Ask Claude `/mirror url` (or `mirror_status`) for the URL of the current session.
+
+- Tokens are 128-bit hex, delivered in the URL fragment — never in `Referer` or hub access logs.
+- The mirror-agent listens on loopback only and sits between claude's hooks and the hub — claude never blocks on the network (hard 50ms hook timeout).
+- In-memory only by default; transcripts vanish when the hub restarts. Opt-in disk persistence + reader tokens + redactor land in Phase M3.
+- Remote input injection lands in Phase M2 (tmux) / M4 (opt-in binary patch).
+
+Full design: [`docs/MIRROR_SESSION_PLAN.md`](docs/MIRROR_SESSION_PLAN.md) and the per-phase files next to it.
+
 ## How it works
 
 The hub is a single Bun process running Elysia. It holds an in-memory registry of connected agents and team memberships, resolves names, and forwards messages. Each Claude Code session runs a plugin (`src/plugin/plugin.ts`) as an MCP stdio subprocess — it opens a WebSocket to the hub, exposes messaging tools to Claude, and pushes inbound messages in as `<channel>` notifications.
