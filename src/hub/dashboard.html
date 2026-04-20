@@ -363,13 +363,7 @@
   .m-tool-badge.error { background: rgba(247,118,142,0.18); color: var(--red); }
   .m-tool-badge.nosupport { background: rgba(187,154,247,0.15); color: var(--purple); }
 
-  /* TodoWrite list */
-  .m-todo { list-style: none; padding: 6px 0 0 0; margin: 0; font-size: 12.5px; }
-  .m-todo li { padding: 2px 0; color: var(--text); }
-  .m-todo li.pending::before { content: "○ "; color: var(--text-dim); }
-  .m-todo li.in_progress::before { content: "● "; color: var(--yellow); }
-  .m-todo li.completed::before { content: "✓ "; color: var(--green); text-decoration: line-through; opacity: 0.7; }
-  .m-todo li.completed { text-decoration: line-through; opacity: 0.7; }
+  /* TodoWrite list — styles live in the later block with .m-checkbox */
 
   /* Diff for Edit/Write */
   .m-diff { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; margin-top: 6px; }
@@ -475,7 +469,77 @@
   .mirror-list-item .mli-watchers {
     color: var(--green); font-weight: 600;
   }
+
+  /* Rendered-markdown styling (shared between assistant messages + plan cards) */
+  .md-body { font-size: 13px; line-height: 1.55; color: var(--text); }
+  .md-body > *:first-child { margin-top: 0; }
+  .md-body > *:last-child { margin-bottom: 0; }
+  .md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
+    font-weight: 600; color: var(--text); margin: 14px 0 4px;
+  }
+  .md-body h1 { font-size: 17px; }
+  .md-body h2 { font-size: 15px; }
+  .md-body h3 { font-size: 14px; color: var(--text-muted); }
+  .md-body h4, .md-body h5, .md-body h6 { font-size: 13px; color: var(--text-muted); }
+  .md-body p { margin: 6px 0; }
+  .md-body ul, .md-body ol { margin: 4px 0 4px 22px; padding: 0; }
+  .md-body li { margin: 2px 0; }
+  .md-body li > p { margin: 0; }
+  .md-body code {
+    background: var(--bg); padding: 1px 5px; border-radius: 3px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    color: var(--cyan);
+  }
+  .md-body pre {
+    background: var(--bg); padding: 10px 12px; border-radius: 4px;
+    margin: 8px 0; border-left: 2px solid var(--border);
+    overflow-x: auto; font-size: 12px; line-height: 1.5;
+  }
+  .md-body pre code { background: none; padding: 0; color: var(--text); }
+  .md-body blockquote {
+    border-left: 3px solid var(--border); padding: 2px 0 2px 12px;
+    margin: 6px 0; color: var(--text-muted);
+  }
+  .md-body strong { font-weight: 600; color: var(--text); }
+  .md-body em { font-style: italic; }
+  .md-body a { color: var(--blue); text-decoration: none; }
+  .md-body a:hover { text-decoration: underline; }
+  .md-body hr { border: 0; border-top: 1px dashed var(--border); margin: 12px 0; }
+  .md-body table {
+    border-collapse: collapse; margin: 8px 0; font-size: 12.5px;
+  }
+  .md-body th, .md-body td {
+    border: 1px solid var(--border); padding: 4px 8px; text-align: left;
+  }
+  .md-body th { background: var(--bg-surface); font-weight: 600; }
+
+  /* TodoWrite — proper checkbox list (replaces ::before pseudo icons) */
+  .m-todo { list-style: none; padding: 4px 0 0 0; margin: 0; font-size: 12.5px; }
+  .m-todo li {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 3px 0; color: var(--text);
+  }
+  .m-todo .m-checkbox {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border);
+    background: var(--bg); flex-shrink: 0; margin-top: 2px;
+    font-size: 11px; line-height: 1; font-weight: 700;
+  }
+  .m-todo .m-checkbox.checked {
+    background: var(--green); border-color: var(--green); color: var(--bg);
+  }
+  .m-todo .m-checkbox.in-progress {
+    border-color: var(--yellow);
+    background: repeating-linear-gradient(
+      45deg, var(--bg), var(--bg) 2px, rgba(224,175,104,0.25) 2px, rgba(224,175,104,0.25) 4px
+    );
+  }
+  .m-todo li.completed .m-todo-text { text-decoration: line-through; opacity: 0.6; }
+  .m-todo li.in_progress .m-todo-text { color: var(--yellow); font-weight: 500; }
+  .m-todo .m-todo-text { flex: 1; word-break: break-word; }
 </style>
+<script src="/bin/marked.umd.min.js"></script>
+<script src="/bin/purify.min.js"></script>
 </head>
 <body>
 
@@ -1161,7 +1225,19 @@
               var t = todos[i];
               var li = document.createElement('li');
               li.className = t.status || 'pending';
-              li.textContent = t.status === 'in_progress' && t.activeForm ? t.activeForm : t.content || '';
+              var text = t.status === 'in_progress' && t.activeForm
+                ? t.activeForm
+                : (t.content || '');
+              var boxClass = t.status === 'completed'
+                ? 'm-checkbox checked'
+                : t.status === 'in_progress'
+                ? 'm-checkbox in-progress'
+                : 'm-checkbox';
+              var boxGlyph = t.status === 'completed' ? '✓' : '';
+              li.innerHTML =
+                '<span class="' + boxClass + '">' + boxGlyph + '</span>' +
+                '<span class="m-todo-text"></span>';
+              li.querySelector('.m-todo-text').textContent = text;
               ul.appendChild(li);
             }
             el.appendChild(ul);
@@ -1225,7 +1301,7 @@
       var planMd = (payload.input && payload.input.plan) || '';
       card.innerHTML =
         '<span class="m-q-banner">plan awaiting approval</span>' +
-        '<div class="m-q-body">' + renderMarkdown(planMd) + '</div>' +
+        '<div class="m-q-body md-body">' + renderMarkdown(planMd) + '</div>' +
         '<div class="m-q-actions">' +
           '<button type="button" class="m-q-action primary" data-action="approve">Approve → compose</button>' +
           '<button type="button" class="m-q-action" data-action="reject">Reject → compose</button>' +
@@ -1285,81 +1361,40 @@
       }
     }
 
-    // ── Tiny markdown renderer (headings / lists / code / bold) ─────
+    // ── Markdown rendering (marked + DOMPurify) ────────────────────
+    // `marked` parses CommonMark + GFM extras (tables, strikethrough, task
+    // lists, etc). DOMPurify then strips any dangerous HTML — Claude's
+    // output is trusted-ish but we still belt-and-brace it since on a
+    // private tailnet one compromised model turn shouldn't XSS the
+    // dashboard. If either lib fails to load (rare), fall back to the
+    // raw text escaped as <pre>.
+
+    var markedReady = typeof window.marked !== 'undefined';
+    var purifyReady = typeof window.DOMPurify !== 'undefined';
+    if (markedReady) {
+      try {
+        window.marked.setOptions({ gfm: true, breaks: true });
+      } catch (e) { /* older/newer API; ignore */ }
+    }
 
     function renderMarkdown(src) {
       if (!src) return '';
-      // Normalize
-      src = String(src).replace(/\r\n/g, '\n');
-      var out = '';
-      var lines = src.split('\n');
-      var i = 0;
-      while (i < lines.length) {
-        var line = lines[i];
-        // Fenced code
-        var fence = line.match(/^```(.*)$/);
-        if (fence) {
-          var body = '';
-          i++;
-          while (i < lines.length && !/^```/.test(lines[i])) {
-            body += lines[i] + '\n';
-            i++;
-          }
-          i++;
-          out += '<pre><code>' + escapeHtml(body) + '</code></pre>';
-          continue;
-        }
-        // Heading
-        var h = line.match(/^(#{1,3}) +(.*)$/);
-        if (h) {
-          out += '<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>';
-          i++; continue;
-        }
-        // List (unordered)
-        if (/^\s*[-*] +/.test(line)) {
-          out += '<ul>';
-          while (i < lines.length && /^\s*[-*] +/.test(lines[i])) {
-            out += '<li>' + inlineMd(lines[i].replace(/^\s*[-*] +/, '')) + '</li>';
-            i++;
-          }
-          out += '</ul>';
-          continue;
-        }
-        // List (ordered)
-        if (/^\s*\d+\. +/.test(line)) {
-          out += '<ol>';
-          while (i < lines.length && /^\s*\d+\. +/.test(lines[i])) {
-            out += '<li>' + inlineMd(lines[i].replace(/^\s*\d+\. +/, '')) + '</li>';
-            i++;
-          }
-          out += '</ol>';
-          continue;
-        }
-        // Blank line → paragraph break
-        if (line.trim() === '') { i++; continue; }
-        // Paragraph
-        var para = line;
-        i++;
-        while (i < lines.length && lines[i].trim() !== '' &&
-               !/^#{1,3} /.test(lines[i]) && !/^```/.test(lines[i]) &&
-               !/^\s*[-*] /.test(lines[i]) && !/^\s*\d+\. /.test(lines[i])) {
-          para += ' ' + lines[i];
-          i++;
-        }
-        out += '<p>' + inlineMd(para) + '</p>';
+      var text = String(src);
+      if (!markedReady) {
+        return '<pre>' + escapeHtml(text) + '</pre>';
       }
-      return out;
-    }
-
-    function inlineMd(s) {
-      if (!s) return '';
-      // Order matters: escape first, then apply inline markup.
-      var out = escapeHtml(s);
-      // `code`
-      out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
-      // **bold**
-      out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      return out;
+      var html;
+      try {
+        html = window.marked.parse(text);
+      } catch (e) {
+        return '<pre>' + escapeHtml(text) + '</pre>';
+      }
+      if (purifyReady) {
+        // Keep links target=_self by default but allow href/title; drop
+        // scripts/iframes/event-handlers.
+        html = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+      }
+      return html;
     }
 
     // ── Main renderEvent ─────────────────────────────────────────────
@@ -1385,7 +1420,7 @@
         el.className = 'm-evt m-evt-assistant';
         el.innerHTML =
           '<div class="m-evt-meta"><span class="m-label">assistant</span> ' + ts + '</div>' +
-          '<pre>' + escapeHtml(payload.text || '') + '</pre>' +
+          '<div class="md-body">' + renderMarkdown(payload.text || '') + '</div>' +
           (payload.truncated ? '<span class="m-truncated">truncated</span>' : '');
       } else if (kind === 'tool_call') {
         // Question tools get their own card; everything else uses the

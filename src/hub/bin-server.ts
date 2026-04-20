@@ -41,6 +41,16 @@ const ASSETS: Record<string, { rel: string; contentType: string }> = {
     rel: "bin/mirror-agent.bundle.js",
     contentType: "application/javascript",
   },
+  // Vendored third-party bundles for the dashboard. Served alongside our
+  // own scripts from the same /bin/* route so browsers hit a single origin.
+  "marked.umd.min.js": {
+    rel: "bin/marked.umd.min.js",
+    contentType: "application/javascript",
+  },
+  "purify.min.js": {
+    rel: "bin/purify.min.js",
+    contentType: "application/javascript",
+  },
 };
 
 const BUNDLE_SOURCE_REL = "src/mirror-agent/agent.ts";
