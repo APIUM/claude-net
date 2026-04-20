@@ -826,14 +826,25 @@ function resolveMirrorHost(
   port: number | undefined,
   request: Request,
 ): string {
+  // Prefer whatever host the client is actually talking to — either an
+  // X-Forwarded-Host set by a reverse proxy, or the direct Host header.
+  // This way the mirror URLs you click in the dashboard point back at
+  // the same hostname you're already viewing the dashboard from (public
+  // DNS name → same name in the URL; LAN hostname → LAN hostname; raw
+  // IP → that IP).
+  //
+  // Only fall back to CLAUDE_NET_HOST when no host info is in the
+  // request (e.g. a curl with no Host header).
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  const directHost = request.headers.get("host");
+  const host = forwardedHost ?? directHost;
+  if (host) return host;
   if (externalHost) {
     if (!externalHost.includes(":") && port) {
       return `${externalHost}:${port}`;
     }
     return externalHost;
   }
-  const headerHost = request.headers.get("host");
-  if (headerHost) return headerHost;
   return `localhost:${port ?? 4815}`;
 }
 
