@@ -108,6 +108,12 @@
 
   /* Agent sidebar */
   .sidebar { width: 200px; flex-shrink: 0; }
+  .sidebar-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
 
   .agent-item {
     display: flex;
@@ -699,9 +705,11 @@
 <main>
   <div class="panel sidebar">
     <div class="panel-header">Agents</div>
-    <div class="panel-body" id="agent-list"></div>
-    <div class="mirror-list-heading">Mirror sessions</div>
-    <div id="mirror-session-list"></div>
+    <div class="sidebar-scroll">
+      <div id="agent-list"></div>
+      <div class="mirror-list-heading">Mirror sessions</div>
+      <div id="mirror-session-list"></div>
+    </div>
   </div>
 
   <div class="panel feed">
