@@ -592,21 +592,15 @@ const TOOL_DEFINITIONS = [
   {
     name: "mirror_consent",
     description:
-      "Set or reset the remote-inject consent policy for this mirror session. Modes: 'ask-first-per-session' (default — prompt on first inject, then allow), 'ask-every-time', 'always' (no prompting), 'never' (inject disabled). Use 'reset' to require a fresh prompt on the next inject.",
+      "Set the remote-inject policy for this mirror session. 'always' (default) accepts every inject from web watchers; 'never' rejects them all (makes the mirror read-only). Use 'reset' to revert to the default.",
     inputSchema: {
       type: "object" as const,
       properties: {
         mode: {
           type: "string",
-          enum: [
-            "ask-first-per-session",
-            "ask-every-time",
-            "always",
-            "never",
-            "reset",
-          ],
+          enum: ["always", "never", "reset"],
           description:
-            "Consent mode, or 'reset' to clear accepted state without changing the mode.",
+            "'always' to accept injects, 'never' to reject all, 'reset' to revert to the default ('always').",
         },
       },
       required: ["mode"],

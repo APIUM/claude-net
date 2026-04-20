@@ -1,76 +1,53 @@
-// First-inject consent flow for mirror-session.
+// Inject consent policy for mirror-session.
 //
-// Four modes:
-//   - "ask-first-per-session" (default) — prompt once on the first remote
-//     inject for each session; allow all subsequent injects silently.
-//   - "ask-every-time"                   — prompt on every inject.
-//   - "always"                           — allow without prompting.
-//   - "never"                            — reject without prompting.
-//
-// Prompting, when required, uses `tmux display-popup` anchored to the
-// session's tmux pane. The user presses Enter within `timeoutMs` to
-// accept or Ctrl-C to reject. If tmux is unavailable or the session has
-// no tmux pane recorded, consent falls back to "never" (inject disabled
-// for read-only sessions).
+// Two modes: `always` (default, accept every inject) and `never` (reject
+// every inject). The old tmux `display-popup` prompt flow was removed in
+// favour of a simple on/off switch — the mirror is designed for
+// private-trust-network use (tailnet / LAN), so every watcher that can
+// reach the hub is already trusted. Users who want a hard off-switch can
+// set `mirror_consent never`; everyone else gets frictionless injection.
 
-import { spawn } from "node:child_process";
-
-export type ConsentMode =
-  | "ask-first-per-session"
-  | "ask-every-time"
-  | "always"
-  | "never";
+export type ConsentMode = "always" | "never";
 
 export type ConsentResult =
   | { ok: true }
-  | {
-      ok: false;
-      reason: "rejected" | "timeout" | "unavailable";
-      message: string;
-    };
+  | { ok: false; reason: "rejected"; message: string };
 
 export interface ConsentOptions {
-  /** Default for all sessions. Overrideable per-session. */
+  /** Default mode for new sessions. */
   defaultMode?: ConsentMode;
-  /** Time the user has to accept, in ms. */
-  timeoutMs?: number;
-  /** Override tmux binary. Default: $TMUX_BIN or "tmux". */
-  tmuxBin?: string;
 }
 
 interface SessionConsent {
   mode: ConsentMode;
-  accepted: boolean;
 }
+
+// Legacy modes that earlier deployments may have persisted or that the
+// plugin tool still accepts; coerce to the new two-mode set.
+const LEGACY_COERCE: Record<string, ConsentMode> = {
+  "ask-first-per-session": "always",
+  "ask-every-time": "always",
+  always: "always",
+  never: "never",
+};
 
 export class ConsentManager {
   private defaultMode: ConsentMode;
-  private timeoutMs: number;
-  private tmuxBin: string;
   private state = new Map<string, SessionConsent>();
 
   constructor(opts: ConsentOptions = {}) {
-    this.defaultMode = opts.defaultMode ?? "ask-first-per-session";
-    this.timeoutMs = opts.timeoutMs ?? 5000;
-    this.tmuxBin = opts.tmuxBin ?? process.env.TMUX_BIN ?? "tmux";
+    this.defaultMode = opts.defaultMode ?? "always";
   }
 
-  /** Explicitly set a mode for a session (e.g. from the plugin mirror_consent tool). */
-  setMode(sid: string, mode: ConsentMode): void {
-    const cur = this.state.get(sid) ?? {
-      mode: this.defaultMode,
-      accepted: false,
-    };
-    cur.mode = mode;
-    if (mode === "always") cur.accepted = true;
-    if (mode === "never") cur.accepted = false;
-    this.state.set(sid, cur);
+  /** Explicitly set a mode for a session. Accepts legacy mode names. */
+  setMode(sid: string, mode: string): void {
+    const coerced = LEGACY_COERCE[mode] ?? "always";
+    this.state.set(sid, { mode: coerced });
   }
 
-  /** Reset consent state for a session (prompt on next inject). */
+  /** Clear any stored mode for a session; next check uses the default. */
   reset(sid: string): void {
-    const cur = this.state.get(sid);
-    if (cur) cur.accepted = false;
+    this.state.delete(sid);
   }
 
   /** Remove any record for a session. */
@@ -79,22 +56,16 @@ export class ConsentManager {
   }
 
   /**
-   * Decide whether to allow an inject for a session, prompting if needed.
-   * `pane` is the tmux pane id captured from hook env; may be empty if the
-   * session is not running inside tmux.
+   * Decide whether to allow an inject for a session. Synchronous-fast —
+   * no prompting, no subprocess. `_pane` and `_watcher` are accepted for
+   * signature stability with the agent's call site; currently unused.
    */
   async check(
     sid: string,
-    pane: string | null | undefined,
-    watcher: string,
+    _pane: string | null | undefined,
+    _watcher: string,
   ): Promise<ConsentResult> {
-    const cur = this.state.get(sid) ?? {
-      mode: this.defaultMode,
-      accepted: false,
-    };
-    this.state.set(sid, cur);
-
-    if (cur.mode === "always") return { ok: true };
+    const cur = this.state.get(sid) ?? { mode: this.defaultMode };
     if (cur.mode === "never") {
       return {
         ok: false,
@@ -102,110 +73,12 @@ export class ConsentManager {
         message: "Consent mode is 'never' for this session.",
       };
     }
-    if (cur.mode === "ask-first-per-session" && cur.accepted) {
-      return { ok: true };
-    }
-
-    // We need to prompt. Only possible when we have a tmux pane.
-    if (!pane) {
-      return {
-        ok: false,
-        reason: "unavailable",
-        message:
-          "Consent required but no tmux pane is recorded for this session. Set consent mode to 'always' if you're in a controlled environment.",
-      };
-    }
-
-    const popup = await this.promptViaPopup(pane, watcher);
-    if (popup.ok) {
-      cur.accepted = true;
-      return { ok: true };
-    }
-    return popup;
-  }
-
-  private promptViaPopup(
-    pane: string,
-    watcher: string,
-  ): Promise<ConsentResult> {
-    const timeoutSeconds = Math.max(1, Math.ceil(this.timeoutMs / 1000));
-    const safeWatcher = watcher.replace(/["'`$\\]/g, "?");
-    // The popup runs a short shell script. `read -t N -p "..."` prompts for
-    // input; Enter → exit 0 → accept, Ctrl-C / timeout → non-zero → reject.
-    const shellCmd = `read -t ${timeoutSeconds} -p "[claude-net/mirror] inject requested by '${safeWatcher}' — press Enter to accept, Ctrl-C to reject (${timeoutSeconds}s): " && exit 0 || exit 2`;
-
-    return new Promise((resolve) => {
-      let proc: ReturnType<typeof spawn>;
-      try {
-        proc = spawn(
-          this.tmuxBin,
-          [
-            "display-popup",
-            "-E",
-            "-t",
-            pane,
-            "-w",
-            "80",
-            "-h",
-            "3",
-            "bash",
-            "-c",
-            shellCmd,
-          ],
-          { stdio: ["ignore", "pipe", "pipe"] },
-        );
-      } catch (err) {
-        resolve({
-          ok: false,
-          reason: "unavailable",
-          message: `Failed to spawn tmux display-popup: ${String(err)}`,
-        });
-        return;
-      }
-
-      const timer = setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
-      }, this.timeoutMs + 2000);
-      if (typeof timer === "object" && "unref" in timer) timer.unref();
-
-      proc.on("error", (err: Error) => {
-        clearTimeout(timer);
-        resolve({
-          ok: false,
-          reason: "unavailable",
-          message: `tmux display-popup error: ${err.message}`,
-        });
-      });
-      proc.on("close", (code: number | null) => {
-        clearTimeout(timer);
-        if (code === 0) {
-          resolve({ ok: true });
-        } else if (code === 2 || code === 1) {
-          resolve({
-            ok: false,
-            reason: "rejected",
-            message: "User rejected or timed out.",
-          });
-        } else {
-          resolve({
-            ok: false,
-            reason: "timeout",
-            message: `display-popup exited with code ${code}`,
-          });
-        }
-      });
-    });
+    return { ok: true };
   }
 
   /** Inspect current state (tests / /status endpoints). */
-  describe(sid: string): { mode: ConsentMode; accepted: boolean } {
+  describe(sid: string): { mode: ConsentMode } {
     const cur = this.state.get(sid);
-    return cur
-      ? { mode: cur.mode, accepted: cur.accepted }
-      : { mode: this.defaultMode, accepted: false };
+    return cur ? { mode: cur.mode } : { mode: this.defaultMode };
   }
 }

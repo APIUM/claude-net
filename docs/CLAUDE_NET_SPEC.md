@@ -305,14 +305,12 @@ Breached requests return `429` with `Retry-After` in seconds.
 
 **FR-8.7: Remote-inject consent (Phase M2+)**
 
-The mirror-agent gates every remote inject through a per-session consent policy:
+The mirror-agent gates every remote inject through a per-session consent policy. claude-net is designed for private-trust-network use (tailnet / LAN), so the default accepts every inject without prompting. Two modes:
 
-- `ask-first-per-session` — default; tmux `display-popup` prompts the terminal user on the first inject per session; subsequent injects pass silently.
-- `ask-every-time` — popup on every inject.
-- `always` — allow without prompting.
-- `never` — reject without prompting.
+- `always` — default; accept every inject.
+- `never` — reject every inject (effectively makes the mirror read-only for that session).
 
-The policy is set via the plugin's `mirror_consent` tool (with mode `reset` to re-arm). When the session isn't running inside tmux (no pane recorded), consent cannot be obtained and injects are refused with `unavailable`.
+The policy is set via the plugin's `mirror_consent` tool (with mode `reset` to revert to the default). Legacy mode names (`ask-first-per-session`, `ask-every-time`) are accepted for backward compatibility and coerced to `always`.
 
 Successful injects are logged back into the transcript as a `notification` event (`source: "mirror-agent"`) for auditability. Rejections / failures are also logged, so watchers can see outcomes.
 
