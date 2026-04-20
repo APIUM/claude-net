@@ -483,6 +483,7 @@
     align-items: center;
     gap: 22px;
     margin-left: auto;
+    min-width: 0;
     /* Inherit font-family/size/letter-spacing/text-transform from
        .mirror-header, so every meta element sits on the same
        baseline. */
@@ -525,6 +526,35 @@
   }
   #mirror-conn.is-error { color: var(--accent); }
   #mirror-conn.is-error::before { color: var(--accent); }
+
+  /* On narrow screens the header was overflowing the viewport because
+     every item (back link, title, sid, cwd, owner, LIVE, share) was
+     crammed into one non-wrapping flex row. Drop the least-essential
+     items (cwd, owner name) and shrink the sid to its short tail so
+     the remaining title / LIVE / share comfortably fit. */
+  @media (max-width: 700px) {
+    .mirror-header {
+      height: auto;
+      min-height: 44px;
+      padding: 8px 12px;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .mirror-nav-back { margin-right: 6px; padding: 3px 7px; }
+    .mirror-title { font-size: 10px; letter-spacing: 1.2px; }
+    .mirror-title .sid {
+      margin-left: 6px;
+      max-width: 8ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+      display: inline-block;
+    }
+    .mirror-meta { gap: 12px; }
+    .mirror-meta .cwd,
+    .mirror-meta #mirror-owner { display: none; }
+  }
 
   /* ── TRANSCRIPT: the broadcast feed.
      Every event is a row hanging off a 72px left-gutter timeline
