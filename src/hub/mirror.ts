@@ -783,6 +783,29 @@ export class MirrorRegistry {
       });
     }
   }
+
+  /** Broadcast an ephemeral thinking-status update to a session's
+   *  watchers. Not stored in the transcript; purely live-view signal. */
+  broadcastThinking(
+    sid: string,
+    payload: { active: boolean; status?: string },
+  ): void {
+    const entry = this.sessions.get(sid);
+    if (!entry) return;
+    const msg = JSON.stringify({
+      event: "mirror:thinking",
+      sid,
+      active: payload.active,
+      ...(payload.status ? { status: payload.status } : {}),
+    });
+    for (const w of entry.watchers) {
+      try {
+        w.ws.send(msg);
+      } catch {
+        // ignore per-watcher send failures
+      }
+    }
+  }
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────
@@ -1426,6 +1449,11 @@ export function wsMirrorPlugin(
             ? (frame.commands as SlashCommand[])
             : undefined,
           error: typeof frame.error === "string" ? frame.error : undefined,
+        });
+      } else if (frame.action === "mirror_thinking" && frame.sid === meta.sid) {
+        mirrorRegistry.broadcastThinking(meta.sid, {
+          active: Boolean(frame.active),
+          status: typeof frame.status === "string" ? frame.status : undefined,
         });
       }
     },

@@ -81,6 +81,26 @@ const RECOVERY_INITIAL_DELAY_MS = 1_000;
 const RECOVERY_MAX_DELAY_MS = 30_000;
 const RECOVERY_MAX_ATTEMPTS = 20;
 
+/** Thinking-indicator poller: tmux capture cadence, and how long a
+ *  session can go without matching the `✻` line before we assume the
+ *  turn is over. */
+const THINKING_POLL_MS = 2_000;
+const THINKING_IDLE_MS = 8_000;
+
+function extractThinkingStatus(paneText: string): string | null {
+  // Claude Code's active thinking line starts with ✻ and looks like:
+  //   ✻ Brewed for 42s
+  //   ✻ Thinking for 3s
+  //   ✻ Compacting…
+  // Scan bottom-up so we pick up the most recent occurrence.
+  const lines = paneText.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = (lines[i] ?? "").trim();
+    if (trimmed.startsWith("✻")) return trimmed;
+  }
+  return null;
+}
+
 /** Directory where oversized web-pastes land as `paste-<uuid>.txt`. */
 const PASTE_DIR = "/tmp/claude-net/pastes";
 /** Delete paste files older than this on agent startup. */
@@ -359,6 +379,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     // Redact before queueing — keeps sensitive content off the hub WS.
     redactor.redactFrame(ingested.frame);
     queueEvent(session, ingested.frame);
+
+    // Thinking-indicator: a turn starts on user_prompt and ends on
+    // assistant_message (the final text) or session_end.
+    if (ingested.frame.kind === "user_prompt") {
+      startThinkingPoller(session);
+    } else if (
+      ingested.frame.kind === "assistant_message" ||
+      ingested.frame.kind === "session_end"
+    ) {
+      stopThinkingPoller(session, "turn-end");
+    }
 
     // Close on session_end.
     if (ingested.frame.kind === "session_end") {
@@ -874,6 +905,79 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     emitAuditEvent(session, `tmux pane reported: ${matches.join(" · ")}`);
   }
 
+  // ── Thinking indicator ──────────────────────────────────────────────
+  // Starts on user_prompt, stops on assistant_message or session_end.
+  // While active, polls the tmux pane every THINKING_POLL_MS and emits
+  // a `mirror_thinking` frame (ephemeral; not stored on hub) whenever
+  // the scraped status line changes. Auto-stops if no status line
+  // matches for THINKING_IDLE_MS (Claude landed at an idle prompt).
+  const thinkingPolls = new Map<
+    string,
+    {
+      timer: ReturnType<typeof setInterval>;
+      lastStatus: string | null;
+      lastMatchAt: number;
+    }
+  >();
+
+  function startThinkingPoller(session: SessionState): void {
+    if (!session.tmuxPane || session.closed) return;
+    if (thinkingPolls.has(session.sid)) return;
+    const state = {
+      timer: null as unknown as ReturnType<typeof setInterval>,
+      lastStatus: null as string | null,
+      lastMatchAt: Date.now(),
+    };
+    const tick = async (): Promise<void> => {
+      if (session.closed || !session.tmuxPane) {
+        stopThinkingPoller(session, "session-closed");
+        return;
+      }
+      const cap = await injector.capturePane(session.tmuxPane, 20);
+      if (!cap.ok) return;
+      const status = extractThinkingStatus(cap.output);
+      if (status) {
+        state.lastMatchAt = Date.now();
+        if (status !== state.lastStatus) {
+          state.lastStatus = status;
+          emitThinkingFrame(session, { active: true, status });
+        }
+      } else if (Date.now() - state.lastMatchAt > THINKING_IDLE_MS) {
+        stopThinkingPoller(session, "idle");
+      }
+    };
+    state.timer = setInterval(() => {
+      void tick();
+    }, THINKING_POLL_MS);
+    if (typeof state.timer === "object" && "unref" in state.timer) {
+      state.timer.unref();
+    }
+    thinkingPolls.set(session.sid, state);
+    void tick();
+  }
+
+  function stopThinkingPoller(session: SessionState, _reason: string): void {
+    const state = thinkingPolls.get(session.sid);
+    if (!state) return;
+    clearInterval(state.timer);
+    thinkingPolls.delete(session.sid);
+    emitThinkingFrame(session, { active: false });
+  }
+
+  function emitThinkingFrame(
+    session: SessionState,
+    payload: { active: boolean; status?: string },
+  ): void {
+    if (!session.ws) return;
+    const frame = {
+      action: "mirror_thinking" as const,
+      sid: session.sid,
+      active: payload.active,
+      ...(payload.status ? { status: payload.status } : {}),
+    };
+    session.ws.send(JSON.stringify(frame));
+  }
+
   function emitAuditEvent(session: SessionState, text: string): void {
     const frame = {
       action: "mirror_event" as const,
@@ -894,6 +998,9 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     if (session.closed) return;
     session.closed = true;
     log(`[${session.sid}] closing (${reason})`);
+    // Stop the thinking poller BEFORE nulling session.ws so its
+    // final "active: false" frame still goes out.
+    stopThinkingPoller(session, "session-close");
     if (session.tail) {
       session.tail.stop();
       session.tail = null;

@@ -108,6 +108,19 @@ export interface MirrorCommandsDoneFrame {
   error?: string;
 }
 
+/**
+ * Ephemeral "is Claude currently working" signal from the agent. Not
+ * stored in the transcript — broadcast-only to watchers. Agent scrapes
+ * the `✻ Brewed for Ns` line out of the tmux pane every couple of
+ * seconds while a turn is in progress, and emits this frame on change.
+ */
+export interface MirrorThinkingFrame {
+  action: "mirror_thinking";
+  sid: string;
+  active: boolean;
+  status?: string;
+}
+
 export type PluginFrame =
   | RegisterFrame
   | SendFrame
@@ -120,7 +133,8 @@ export type PluginFrame =
   | PingFrame
   | MirrorEventFrame
   | MirrorPasteDoneFrame
-  | MirrorCommandsDoneFrame;
+  | MirrorCommandsDoneFrame
+  | MirrorThinkingFrame;
 
 // ── Hub → Plugin frames (discriminated union on `event`) ──────────────────
 

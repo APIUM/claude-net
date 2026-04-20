@@ -1373,6 +1373,23 @@
   .mirror-status.error { color: var(--accent); }
   .mirror-status:empty { padding: 0; }
 
+  /* Thinking ghost row: sits between the transcript and compose bar.
+     Scraped straight from the TUI's `✻ Brewed for Ns` line by the
+     mirror-agent, so it shows the real elapsed time. Hidden when the
+     session is idle. */
+  .mirror-thinking {
+    display: none;
+    padding: 6px 20px;
+    background: var(--bg-panel);
+    border-top: 1px dashed var(--border);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.4px;
+    animation: live-pulse 2.4s ease-in-out infinite;
+  }
+  .mirror-thinking.is-active { display: block; }
+
 
   /* ── Mirror sessions sidebar list — 'active broadcasts'. ── */
   .mirror-list-heading {
@@ -1754,6 +1771,7 @@
   </header>
   <div class="mirror-status" id="mirror-status"></div>
   <div class="mirror-transcript" id="mirror-transcript"></div>
+  <div class="mirror-thinking" id="mirror-thinking"></div>
   <div class="mirror-compose compose-hidden" id="mirror-compose">
     <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
     <div class="mirror-compose-frame">
@@ -3348,6 +3366,18 @@
         });
     }
 
+    var thinkingEl = document.getElementById('mirror-thinking');
+    function updateThinkingIndicator(active, status) {
+      if (!thinkingEl) return;
+      if (active && status) {
+        thinkingEl.textContent = status;
+        thinkingEl.classList.add('is-active');
+      } else {
+        thinkingEl.classList.remove('is-active');
+        thinkingEl.textContent = '';
+      }
+    }
+
     var isOwner = false;
     function applyInit(msg) {
       cwdEl.textContent = msg.cwd || '';
@@ -3394,6 +3424,7 @@
         try { msg = JSON.parse(e.data); } catch { return; }
         if (msg.event === 'mirror:init') applyInit(msg);
         else if (msg.event === 'mirror:event') renderEvent(msg);
+        else if (msg.event === 'mirror:thinking') updateThinkingIndicator(msg.active, msg.status);
         else if (msg.event === 'error') {
           statusEl.className = 'mirror-status error';
           statusEl.textContent = msg.message || 'error';
