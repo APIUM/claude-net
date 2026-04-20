@@ -1963,15 +1963,13 @@
 
   function renderMirrorSessions() {
     if (!mirrorListEl) return;
-    // Sort by created_at (stable) — sorting by last_event_at made rows
-    // re-order every time either session received an event, so forks
-    // in the same folder appeared to "switch around" while you were
-    // watching them. Creation time never changes, so the order is
-    // fixed for as long as the sessions live.
+    // Sort by last_event_at (most recent first). Rows will reorder as
+    // events arrive, but that's desirable — the active session floats
+    // to the top. Tiebreak by sid for stable ordering of quiet sessions.
     var entries = Array.from(mirrorSessions.values())
       .sort(function(a, b) {
-        var ac = a.created_at || '', bc = b.created_at || '';
-        if (ac !== bc) return ac.localeCompare(bc);
+        var ae = a.last_event_at || '', be = b.last_event_at || '';
+        if (ae !== be) return be.localeCompare(ae);
         return (a.sid || '').localeCompare(b.sid || '');
       });
     if (entries.length === 0) {
