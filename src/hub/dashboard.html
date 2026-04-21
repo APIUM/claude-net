@@ -2180,6 +2180,15 @@
     setConnState('connecting');
     if (statusEl) { statusEl.className = 'mirror-status'; statusEl.textContent = ''; }
 
+    // Every listener attached inside attachMirror is wired to this
+    // controller's signal; detachMirror aborts it so the DOM elements
+    // (compose/textarea/stop/slash popover/transcript) don't accumulate
+    // stale handlers across agent switches. Without this, clicking
+    // "Transmit" N switches later fires N POSTs, each targeting a
+    // different sid.
+    var attachAc = new AbortController();
+    var attachSig = attachAc.signal;
+
     var rendered = Object.create(null); // uuid → true
     var userScrolledUp = false;
     var SCROLL_LOCK_THRESHOLD = 80;
@@ -2196,7 +2205,7 @@
     transcriptEl.addEventListener('scroll', function() {
       var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
       userScrolledUp = distance > SCROLL_LOCK_THRESHOLD;
-    });
+    }, { signal: attachSig });
 
     function scrollToBottom() {
       if (userScrolledUp) return;
@@ -3731,9 +3740,12 @@
     mConnect();
 
     // Wire up the teardown closure so a subsequent attach (or detach) can
-    // shut this session down cleanly.
+    // shut this session down cleanly. `attachAc.abort()` unbinds every
+    // listener registered above so the reused DOM elements don't keep
+    // firing handlers for the previous sid.
     mirrorTeardown = function() {
       teardownCalled = true;
+      try { attachAc.abort(); } catch (e) { /* ignore */ }
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
       try { if (mws) mws.close(); } catch (e) { /* ignore */ }
@@ -3814,7 +3826,7 @@
         });
     }
 
-    if (composeSend) composeSend.addEventListener('click', doInject);
+    if (composeSend) composeSend.addEventListener('click', doInject, { signal: attachSig });
 
     // ── Enter-key mode ───────────────────────────────────────────
     // Touch-primary devices (phones, tablets without a hardware
@@ -3938,17 +3950,17 @@
       composeText.addEventListener('input', function() {
         slashActiveIdx = 0;
         renderSlash();
-      });
-      composeText.addEventListener('click', renderSlash);
+      }, { signal: attachSig });
+      composeText.addEventListener('click', renderSlash, { signal: attachSig });
       composeText.addEventListener('keyup', function(e) {
         if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
           renderSlash();
         }
-      });
+      }, { signal: attachSig });
       composeText.addEventListener('blur', function() {
         // Delay-close so click handlers fire first.
         setTimeout(function() { slashPopover.classList.remove('is-open'); slashOpen = false; }, 120);
-      });
+      }, { signal: attachSig });
       // Click / tap to insert.
       slashPopover.addEventListener('mousedown', function(e) {
         var row = e.target.closest && e.target.closest('.mirror-slash-item');
@@ -3956,7 +3968,7 @@
         e.preventDefault(); // keep focus on the textarea
         slashActiveIdx = parseInt(row.getAttribute('data-idx'), 10) || 0;
         slashInsertActive();
-      });
+      }, { signal: attachSig });
     }
 
     if (composeText) {
@@ -4007,7 +4019,7 @@
           // Desktop: Enter sends, Shift+Enter newlines.
           if (!e.shiftKey) { e.preventDefault(); doInject(); }
         }
-      });
+      }, { signal: attachSig });
     }
 
     var stopBtn = document.getElementById('mirror-stop-btn');
@@ -4024,7 +4036,7 @@
             }
           })
           .catch(function() { stopBtn.disabled = false; });
-      });
+      }, { signal: attachSig });
     }
 
   }
