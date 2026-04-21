@@ -1533,6 +1533,20 @@
 
   /* Offcanvas overlay (<md) gets a backdrop dimmer. */
   .offcanvas-backdrop { background-color: rgba(0, 0, 0, 0.55); }
+
+  /* Mobile polish (<md).
+     Let the mirror header wrap instead of overflowing, keep the Stop
+     button on the first row, and tighten the navbar so the hamburger,
+     brand, agent count and theme toggle all fit at 375px. */
+  @media (max-width: 767.98px) {
+    .cn-header { flex-wrap: wrap; row-gap: 4px; padding: 6px 12px; }
+    .cn-header #mirror-stop-btn { order: 1; margin-left: auto; }
+    .cn-header .cwd { flex-basis: 100%; order: 2; font-size: 10px; }
+    nav[data-cn-navbar] .container-fluid { gap: 6px; padding-inline: 10px; }
+    nav[data-cn-navbar] .navbar-brand { font-size: 15px; }
+    nav[data-cn-navbar] .badge { font-size: 10px; }
+    nav[data-cn-navbar] #conn-label { display: none; } /* dot stays, text hidden */
+  }
 </style>
 <script src="/bin/bootstrap.bundle.min.js"></script>
 <script src="/bin/marked.umd.min.js"></script>

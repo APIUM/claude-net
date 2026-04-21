@@ -100,9 +100,12 @@ async function takeShots(): Promise<void> {
   const browser = await chromium.launch();
   try {
     for (const shot of SHOTS) {
+      const isMobile = shot.viewport.width < 768;
       const ctx = await browser.newContext({
         viewport: shot.viewport,
         deviceScaleFactor: 2,
+        hasTouch: isMobile,
+        isMobile,
       });
       const page = await ctx.newPage();
       // Seed the theme key before first paint so the inline theme bootstrap
