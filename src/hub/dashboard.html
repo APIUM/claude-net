@@ -1463,19 +1463,6 @@
     letter-spacing: 1.2px;
   }
   .cn-header-sub { color: var(--text-dim); text-transform: none; letter-spacing: 0; }
-  /* Thinking indicator in the mirror header — ✻ line sourced from the
-     TUI's "Brewed for Ns" scrape. Auto-hides when empty; pulses accent
-     red when active so the state is obvious at a glance. */
-  .cn-header-thinking {
-    color: var(--accent);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.4px;
-    white-space: nowrap;
-    animation: live-pulse 2.4s ease-in-out infinite;
-  }
-  .cn-header-thinking:empty { display: none; }
-
   .cn-main-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .cn-view { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 
@@ -1660,7 +1647,6 @@
         <span class="cn-header-title" id="mirror-owner"></span>
         <span class="cn-header-sub cwd" id="mirror-cwd"></span>
         <span id="mirror-conn">connecting…</span>
-        <span class="cn-header-thinking" id="mirror-thinking"></span>
         <button id="mirror-stop-btn" class="btn btn-outline-danger btn-sm ms-auto" type="button" title="Send Escape to the tmux session (interrupt Claude)">■ stop</button>
       </div>
     </header>
@@ -1679,6 +1665,7 @@
       <section id="mirror-view" class="cn-view d-none">
         <div class="mirror-status" id="mirror-status"></div>
         <div class="mirror-transcript" id="mirror-transcript"></div>
+        <div class="mirror-thinking" id="mirror-thinking"></div>
         <div class="mirror-compose compose-hidden" id="mirror-compose">
           <div class="mirror-slash-popover" id="mirror-slash-popover"></div>
           <div class="mirror-compose-frame">
@@ -1833,6 +1820,8 @@
         const entry = mirrorBySid.get(event.sid);
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
+          // Re-render the sidebar so the most-active session floats up.
+          renderAgents();
         }
         break;
       }
@@ -1903,11 +1892,21 @@
 
   // --- Render agents (unified sidebar) ---
   function renderAgents() {
+    // Sort order:
+    //   1. online agents before offline;
+    //   2. agents with an active mirror before those without;
+    //   3. among mirrored agents, most-recent last_event_at first (so the
+    //      busiest session floats to the top and reorders as events arrive);
+    //   4. fall back to alphabetical by fullName for stable ordering.
     var sorted = Array.from(agents.values()).sort(function(a, b) {
-      // Online first, then agents with an active mirror, then by name.
       if (a.status !== b.status) return a.status === 'online' ? -1 : 1;
       var ma = a.mirrorSid ? 0 : 1, mb = b.mirrorSid ? 0 : 1;
       if (ma !== mb) return ma - mb;
+      if (a.mirrorSid && b.mirrorSid) {
+        var ea = (mirrorBySid.get(a.mirrorSid) || {}).last_event_at || '';
+        var eb = (mirrorBySid.get(b.mirrorSid) || {}).last_event_at || '';
+        if (ea !== eb) return eb.localeCompare(ea);
+      }
       return a.fullName.localeCompare(b.fullName);
     });
 
