@@ -136,15 +136,24 @@
   .status-dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent-glow); }
   .status-dot.offline { background: var(--text-muted); }
 
-  /* Agent row dot + name — used by the unified sidebar. */
+  /* Agent row indicator. Three states:
+       online + mirror   → filled accent dot (clickable, row opens mirror)
+       online, no mirror → hollow accent ring (not clickable, no mirror)
+       offline           → small muted dot (not clickable) */
   .agent-dot {
-    width: 5px; height: 5px;
+    width: 7px; height: 7px;
     flex-shrink: 0;
+    border-radius: 50%;
     background: var(--text-muted);
   }
   .agent-dot.online { background: var(--accent); box-shadow: 0 0 4px var(--accent-glow); }
+  .agent-dot.no-mirror {
+    background: transparent;
+    border: 1px solid var(--text-muted);
+    box-shadow: none;
+  }
   .agent-dot.offline { background: var(--text-muted); opacity: 0.5; }
-  .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 
   /* Scrollbar */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -1339,10 +1348,26 @@
     font-family: var(--font-mono);
     font-size: 12px;
   }
+  /* Broadcast callsign: mono + uppercase with a pulsing accent dot. */
   nav[data-cn-navbar] .navbar-brand {
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
     color: var(--text);
     font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+  }
+  nav[data-cn-navbar] .navbar-brand::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: live-pulse 2.2s ease-in-out infinite;
+    flex-shrink: 0;
   }
   nav[data-cn-navbar] .btn-outline-secondary {
     --bs-btn-color: var(--text-dim);
@@ -1506,6 +1531,22 @@
     background: var(--accent);
     margin: -8px 0 -8px -14px;
     margin-right: 6px;
+  }
+  /* Rows without an active mirror: show them but make clear they're not
+     clickable. Tooltip explains why. */
+  #agent-list .list-group-item.is-inactive {
+    cursor: default;
+    color: var(--text-muted);
+  }
+  #agent-list .list-group-item.is-inactive:hover { background: transparent; color: var(--text-muted); }
+  #agent-list .list-group-item .row-hint {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    opacity: 0.7;
   }
   .cn-home-glyph { color: var(--text-dim); font-size: 11px; }
 
@@ -1873,15 +1914,29 @@
       var ag = sorted[i];
       var clickable = !!ag.mirrorSid;
       var activeCls = (ag.mirrorSid && ag.mirrorSid === activeAgentSid) ? ' active' : '';
+      var inactiveCls = clickable ? '' : ' is-inactive';
+      // Dot state:
+      //   online + mirror   → .online
+      //   online, no mirror → .no-mirror (hollow)
+      //   offline           → .offline
+      var dotState = ag.status === 'offline'
+        ? 'offline'
+        : (clickable ? 'online' : 'no-mirror');
+      var hint = '';
+      if (!clickable && ag.status !== 'offline') {
+        hint = '<span class="row-hint" title="No mirror session — this agent is registered for messaging only.">no mirror</span>';
+      } else if (ag.status === 'offline') {
+        hint = '<span class="row-hint">offline</span>';
+      }
       var tag = clickable ? 'a' : 'div';
       var href = clickable ? ' href="#agent=' + encodeURIComponent(ag.mirrorSid) + '"' : '';
-      html += '<' + tag + ' class="list-group-item list-group-item-action agent-item' + activeCls + '"'
-        + (clickable ? '' : ' style="cursor:default"')
+      html += '<' + tag + ' class="list-group-item list-group-item-action agent-item' + activeCls + inactiveCls + '"'
         + href
         + ' data-sid="' + escapeAttr(ag.mirrorSid || '') + '"'
         + ' data-name="' + escapeAttr(ag.fullName) + '">'
-        + '<span class="agent-dot ' + ag.status + '"></span>'
+        + '<span class="agent-dot ' + dotState + '"></span>'
         + '<span class="agent-name">' + escapeHtml(ag.fullName) + '</span>'
+        + hint
         + '</' + tag + '>';
     }
     agentListEl.innerHTML = html;
