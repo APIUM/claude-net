@@ -1816,11 +1816,15 @@
         break;
       }
 
-      case 'mirror:event': {
+      case 'mirror:event':
+      case 'mirror:activity': {
+        // Lightweight ping fired by the hub for every recorded mirror event
+        // (not just ones the dashboard is watching live). Bump last_event_at
+        // + re-render so the most-active session floats to the top of the
+        // sidebar regardless of where the user is interacting from.
         const entry = mirrorBySid.get(event.sid);
         if (entry) {
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
-          // Re-render the sidebar so the most-active session floats up.
           renderAgents();
         }
         break;

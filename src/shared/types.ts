@@ -306,6 +306,18 @@ export interface MirrorWatcherLeftEvent {
   watcher_id: string;
 }
 
+/**
+ * Lightweight activity ping broadcast to the dashboard socket every time a
+ * mirror session records an event. Carries only sid + ts so dashboards can
+ * bump last_event_at and re-sort the sidebar without receiving full
+ * per-session payloads (which can be KB-sized).
+ */
+export interface MirrorActivityEvent {
+  event: "mirror:activity";
+  sid: string;
+  ts: number;
+}
+
 export type DashboardEvent =
   | AgentConnectedEvent
   | AgentDisconnectedEvent
@@ -315,7 +327,8 @@ export type DashboardEvent =
   | MirrorSessionEndedEvent
   | MirrorEventBroadcastEvent
   | MirrorWatcherJoinedEvent
-  | MirrorWatcherLeftEvent;
+  | MirrorWatcherLeftEvent
+  | MirrorActivityEvent;
 
 // ── Data model types ──────────────────────────────────────────────────────
 

@@ -234,6 +234,15 @@ export class MirrorRegistry {
       }
     }
 
+    // Lightweight activity ping to the dashboard socket — no payload, so we
+    // don't flood every dashboard with every tool-result blob. Dashboards
+    // use this to bump last_event_at and re-sort the sidebar.
+    this.dashboardBroadcast({
+      event: "mirror:activity",
+      sid,
+      ts: frame.ts,
+    });
+
     return { ok: true, duplicate: false };
   }
 
