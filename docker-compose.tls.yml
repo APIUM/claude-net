@@ -1,0 +1,20 @@
+# Optional TLS overlay for the dev compose stack.
+#
+# Usage:
+#   ln -s <your-cert>.crt tls.crt
+#   ln -s <your-cert>.key tls.key
+#   docker compose -f docker-compose.dev.yml -f docker-compose.tls.yml up -d
+#
+# The hub reads CLAUDE_NET_TLS_CERT and CLAUDE_NET_TLS_KEY at startup
+# (see src/hub/index.ts). When both are set, Bun serves HTTPS/WSS on
+# CLAUDE_NET_PORT instead of plain HTTP. Plugin / mirror-agent clients
+# must be updated to wss:// URLs accordingly.
+
+services:
+  hub:
+    environment:
+      - CLAUDE_NET_TLS_CERT=/certs/tls.crt
+      - CLAUDE_NET_TLS_KEY=/certs/tls.key
+    volumes:
+      - ./tls.crt:/certs/tls.crt:ro
+      - ./tls.key:/certs/tls.key:ro
