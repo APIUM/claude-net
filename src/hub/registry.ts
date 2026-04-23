@@ -12,6 +12,7 @@ export interface AgentEntry {
   wsIdentity: object;
   teams: Set<string>;
   connectedAt: Date;
+  lastPongAt: number;
 }
 
 export interface DisconnectedEntry {
@@ -120,6 +121,7 @@ export class Registry {
       // Rename wins over disconnected-restore if both apply (unlikely).
       teams: inheritedTeams ?? restoredTeams,
       connectedAt: new Date(),
+      lastPongAt: Date.now(),
     };
     this.agents.set(fullName, entry);
     return { ok: true, entry, restored, renamedFrom };
@@ -275,7 +277,7 @@ export class Registry {
   }
 }
 
-function parseName(fullName: string): {
+export function parseName(fullName: string): {
   session: string;
   user: string;
   host: string;
