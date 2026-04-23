@@ -506,7 +506,8 @@ describe("query_events WS frame", () => {
       const resp = await new Promise<Record<string, unknown>>(
         (resolve, reject) => {
           const timer = setTimeout(
-            () => reject(new Error("Timeout waiting for query_events response")),
+            () =>
+              reject(new Error("Timeout waiting for query_events response")),
             2000,
           );
           const onMsg = (event: MessageEvent) => {
@@ -575,10 +576,7 @@ describe("query_events WS frame", () => {
 
       const resp = await new Promise<Record<string, unknown>>(
         (resolve, reject) => {
-          const timer = setTimeout(
-            () => reject(new Error("Timeout")),
-            2000,
-          );
+          const timer = setTimeout(() => reject(new Error("Timeout")), 2000);
           const onMsg = (event: MessageEvent) => {
             const frame = JSON.parse(event.data as string) as Record<
               string,
@@ -627,10 +625,7 @@ describe("query_events WS frame", () => {
 
       const resp = await new Promise<Record<string, unknown>>(
         (resolve, reject) => {
-          const timer = setTimeout(
-            () => reject(new Error("Timeout")),
-            2000,
-          );
+          const timer = setTimeout(() => reject(new Error("Timeout")), 2000);
           const onMsg = (event: MessageEvent) => {
             const frame = JSON.parse(event.data as string) as Record<
               string,
