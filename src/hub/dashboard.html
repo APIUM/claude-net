@@ -3068,6 +3068,7 @@
     var launchBtn = e.target.closest && e.target.closest('[data-launch-host]');
     if (launchBtn) {
       e.preventDefault();
+      dismissMobileSidebar();
       openLaunchModal(launchBtn.getAttribute('data-launch-host'));
       return;
     }
