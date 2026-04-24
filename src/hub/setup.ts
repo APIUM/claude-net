@@ -77,12 +77,16 @@ pkill -f 'claude-net-mirror-agent|mirror-agent\\.bundle\\.js' 2>/dev/null || tru
 rm -f /tmp/claude-net/mirror-agent-*.port 2>/dev/null || true
 
 echo "[2/4] Registering claude-net MCP server…"
+# Remove any previous entry first — 'claude mcp add' refuses to
+# overwrite, so on re-install the existing server (which may point at
+# a stale hub URL) would otherwise silently survive. 'remove' exits
+# non-zero when the name is not registered; tolerate that.
+claude mcp remove --scope user claude-net >/dev/null 2>&1 || true
 claude mcp add \\
     --scope user \\
     -e CLAUDE_NET_HUB="\$HUB" \\
     --transport stdio \\
-    claude-net -- bash -c 'T=\$(mktemp /tmp/claude-net-plugin.XXXXXXXXXX) && P="\$T.ts" && mv "\$T" "\$P" && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"' \\
-    2>&1 | grep -v "already configured" || true
+    claude-net -- bash -c 'T=\$(mktemp /tmp/claude-net-plugin.XXXXXXXXXX) && P="\$T.ts" && mv "\$T" "\$P" && curl -fsSL '"\$HUB"'/plugin.ts -o "\$P" && exec bun run "\$P"'
 
 echo "[3/4] Merging mirror hooks + launch config into \${SETTINGS}…"
 if [ ! -f "\$SETTINGS" ]; then
