@@ -59,6 +59,36 @@ curl http://telie.story-kettle.ts.net:4815/setup | bash
 
 `CLAUDE_NET_HOST` gets baked into the setup script so the registration points at the right address. There's also a `docker-compose.yml` in the repo if you'd rather run it that way.
 
+### Enable HTTPS (recommended)
+
+Browsers only treat `localhost` and `https://` origins as "secure contexts", so the dashboard's service worker and **PWA install prompt** (Chrome/Edge URL-bar install, iOS "Add to Home Screen") do not work over plain HTTP to a LAN hostname. If your hub lives on a Tailnet, the easiest path is Tailscale's built-in cert provisioning — it issues a browser-trusted Let's Encrypt cert for any `*.ts.net` MagicDNS name with no ACME plumbing to maintain.
+
+Enable the **MagicDNS** and **HTTPS Certificates** options on your tailnet (see [Tailscale: Enabling HTTPS](https://tailscale.com/docs/how-to/set-up-https-certificates)), then on the hub host:
+
+```bash
+sudo tailscale cert telie.story-kettle.ts.net
+# Wrote public cert to telie.story-kettle.ts.net.crt
+# Wrote private key to telie.story-kettle.ts.net.key
+```
+
+Wire the cert into the hub with the `docker-compose.tls.yml` overlay in the repo. It bind-mounts `./tls.crt` and `./tls.key` into the container and sets `CLAUDE_NET_TLS_CERT` / `CLAUDE_NET_TLS_KEY` so Bun serves HTTPS/WSS on `CLAUDE_NET_PORT`:
+
+```bash
+ln -s telie.story-kettle.ts.net.crt tls.crt
+ln -s telie.story-kettle.ts.net.key tls.key
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+```
+
+Update each participant's install to use the HTTPS URL so the MCP plugin and mirror-agent get WSS URLs baked into their configs:
+
+```bash
+curl https://telie.story-kettle.ts.net:4815/setup | bash
+```
+
+The dashboard at `https://telie.story-kettle.ts.net:4815/` is now PWA-installable — Chrome/Edge show the install icon in the URL bar after the first visit; iOS Safari offers "Add to Home Screen" from the share sheet.
+
+Tailscale's ACME integration only re-issues certs when `tailscale cert` is re-invoked, so schedule it (cron / systemd timer) before the ~90-day expiry and restart the hub container afterwards so Bun re-reads the cert file.
+
 ## Addressing
 
 Agents are identified as `session:user@host`, e.g. `firefly:andrew@laptop`. You can address them four ways:
