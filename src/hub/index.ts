@@ -21,8 +21,11 @@ export interface CreateHubOptions {
   pingIntervalMs?: number;
   /**
    * Evict a registered WS whose last pong (or register time) is older
-   * than this. 3× pingIntervalMs is a reasonable default — gives
-   * slack for scheduler jitter and a slow-but-alive client.
+   * than this. 6× pingIntervalMs — wide enough to absorb a two-ping
+   * miss during a bursty-latency window (Tailscale DERP hops, WSL2
+   * network pauses, event-loop stalls) without churning the
+   * connection, while still catching a dead socket in reasonable
+   * time.
    */
   staleThresholdMs?: number;
   /**
@@ -55,7 +58,7 @@ export interface Hub {
 
 export function createHub(options: CreateHubOptions = {}): Hub {
   const pingIntervalMs = options.pingIntervalMs ?? 5_000;
-  const staleThresholdMs = options.staleThresholdMs ?? 15_000;
+  const staleThresholdMs = options.staleThresholdMs ?? 30_000;
   const port = options.port ?? (Number(process.env.CLAUDE_NET_PORT) || 4815);
   const startedAt = new Date();
 
