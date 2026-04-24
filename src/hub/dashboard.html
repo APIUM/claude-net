@@ -830,10 +830,30 @@
   }
 
   /* On touch-primary devices (phones, tablets without a hardware
-     keyboard) the Send button disappears entirely and the textarea
-     frame spans the full bar. Submit happens via a double-Enter
-     (two presses within 500 ms); single Enter inserts a newline. */
-  .mirror-compose.is-touch .mirror-compose-actions { display: none; }
+     keyboard) the Send button collapses to an icon-only tap target
+     and the keyboard hint is suppressed (it's already hidden below
+     700 px but belt-and-braces here for larger tablets in touch
+     mode). Double-Enter (two presses within 500 ms) still works as
+     a software-keyboard shortcut for users who prefer it. */
+  .mirror-compose.is-touch .mirror-compose-hint { display: none; }
+  .mirror-compose.is-touch .mirror-compose-actions {
+    padding: 0 8px;
+    gap: 0;
+  }
+  .mirror-compose.is-touch #mirror-compose-send {
+    /* Icon-only: hide the "Transmit" text node, let the ::before ↵
+       glyph carry the affordance. Bump the tap target to 44×44 to
+       satisfy touch accessibility guidelines. */
+    font-size: 0;
+    min-width: 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+  }
+  .mirror-compose.is-touch #mirror-compose-send::before {
+    font-size: 22px;
+    line-height: 1;
+  }
   .mirror-compose.is-touch .mirror-compose-frame { flex: 1; }
   .mirror-compose.is-touch .mirror-compose-frame::before {
     /* Prompt rail stays but shrinks a little to reclaim tap-space. */
@@ -5102,11 +5122,11 @@
     // Instead:
     //   - Desktop (pointer: fine): Enter sends, Shift+Enter newlines.
     //     The Transmit button is visible as the explicit affordance.
-    //   - Touch: Enter always inserts a newline; submit is a quick
-    //     double-Enter (two Enter presses within DOUBLE_ENTER_MS).
-    //     Lets you still type blank lines for paragraph breaks as
-    //     long as you pause between them. No on-screen button is
-    //     rendered on mobile — the textarea goes full-width.
+    //   - Touch: Enter always inserts a newline; submit is either
+    //     tapping the icon-only Send button (a 44×44 ↵ target) or a
+    //     quick double-Enter (two Enter presses within DOUBLE_ENTER_MS).
+    //     The double-Enter shortcut lets you still type blank lines
+    //     for paragraph breaks as long as you pause between them.
     var isTouchPrimary = false;
     try {
       isTouchPrimary = window.matchMedia(
