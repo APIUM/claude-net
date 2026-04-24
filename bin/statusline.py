@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, sys, io, os, socket, re, glob, time
+import json, sys, io, os, socket, re, glob, time, subprocess
 
 if os.environ.get("VSCODE_PID"):
     sys.exit(0)
@@ -100,31 +100,98 @@ def fmt_reset(epoch):
     return f"({hours}h)"
 
 
+def _find_claude_pid():
+    """Walk up the parent chain from os.getppid() until we hit a
+    process whose executable name starts with 'claude' (matches
+    'claude', 'claude-patched', etc.), and return that pid.
+
+    Claude Code spawns the statusline under a shell wrapper, so
+    os.getppid() is typically the shell — not Claude Code itself.
+    The plugin's state file is keyed by its own process.ppid, which
+    IS Claude Code's pid (stdio MCP subprocess is a direct child).
+    Walking up until we find the claude process lets us look up the
+    right state file deterministically.
+
+    Uses `ps` rather than /proc so it works on macOS too. Returns
+    None on any failure — caller must fall back.
+    """
+    pid = os.getppid()
+    for _ in range(10):  # defensive bound against cycles / runaway walks
+        if pid <= 1:
+            return None
+        try:
+            out = subprocess.check_output(
+                ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            return None
+        if not out:
+            return None
+        parts = out.split(None, 1)
+        if len(parts) < 2:
+            return None
+        ppid_s, comm = parts[0], parts[1]
+        # `comm` is basename-of-argv0. Claude Code patched binaries are
+        # e.g. "claude-patched"; stock install is "claude". Any prefix
+        # match on "claude" is sufficient here.
+        if comm.startswith("claude"):
+            return pid
+        try:
+            pid = int(ppid_s)
+        except ValueError:
+            return None
+    return None
+
+
+def _read_state_file(path):
+    """Load and validate a single state file. Returns state dict or None
+    (for >24h-stale or malformed files)."""
+    try:
+        with open(path) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    updated = state.get("updated_at", "")
+    if updated:
+        try:
+            age = time.time() - time.mktime(
+                time.strptime(updated[:19], "%Y-%m-%dT%H:%M:%S")
+            )
+            if age > 86400:
+                return None
+        except (ValueError, OverflowError):
+            pass
+    return state
+
+
 def read_claude_net_state(cwd):
     """Read claude-net plugin state file. Returns dict or None."""
     state_dir = "/tmp/claude-net"
-    ppid = os.getppid()
 
-    # Primary: PPID-keyed file (plugin and statusline share Claude Code as parent)
-    primary = os.path.join(state_dir, f"state-{ppid}.json")
-    if os.path.exists(primary):
-        try:
-            with open(primary) as f:
-                state = json.load(f)
-            # Ignore stale files (>24h)
-            updated = state.get("updated_at", "")
-            if updated:
-                try:
-                    age = time.time() - time.mktime(
-                        time.strptime(updated[:19], "%Y-%m-%dT%H:%M:%S")
-                    )
-                    if age > 86400:
-                        return None
-                except (ValueError, OverflowError):
-                    pass
+    # Primary: find Claude Code's pid by walking the parent chain, then
+    # read state-<claude_pid>.json. The plugin writes its state file
+    # keyed by process.ppid (which is Claude Code's pid — stdio MCP is
+    # a direct child), so this is a deterministic match whenever the
+    # walk succeeds.
+    claude_pid = _find_claude_pid()
+    if claude_pid is not None:
+        primary = os.path.join(state_dir, f"state-{claude_pid}.json")
+        if os.path.exists(primary):
+            state = _read_state_file(primary)
+            if state is not None:
+                return state
+
+    # Secondary: direct os.getppid() — covers the rare case where the
+    # statusline is spawned as a direct Claude Code child (no shell
+    # wrapper). Harmless when the walk already succeeded because
+    # primary would have returned first.
+    direct = os.path.join(state_dir, f"state-{os.getppid()}.json")
+    if os.path.exists(direct):
+        state = _read_state_file(direct)
+        if state is not None:
             return state
-        except (json.JSONDecodeError, OSError):
-            pass
 
     # Fallback: glob for any state file matching cwd.
     # Multiple plugins can write state for the same cwd (concurrent
