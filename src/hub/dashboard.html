@@ -865,7 +865,17 @@
   /* iOS Safari auto-zooms the viewport whenever a focused input's
      font-size is under 16 px. Bump the textarea to 16 px on touch
      devices specifically — desktop keeps 13 px for density. */
-  .mirror-compose.is-touch textarea { font-size: 16px; }
+  .mirror-compose.is-touch textarea {
+    font-size: 16px;
+    line-height: 1.3;
+    padding: 6px 10px;
+  }
+  .mirror-compose.is-touch {
+    padding:
+      6px calc(10px + env(safe-area-inset-right))
+      calc(6px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left));
+  }
+  .mirror-compose.is-touch .mirror-compose-frame::before { padding-top: 6px; }
 
   /* ── Slash-command autocomplete popover ─────────────────────────
      Floats above the compose textarea whenever the current
