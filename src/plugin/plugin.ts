@@ -629,16 +629,10 @@ export class Plugin {
     }
 
     // _ack_channel is handled locally — flips channel_capable and
-    // pushes the update to the hub. Idempotent. Render as a one-line
-    // text result rather than the default pretty-printed JSON: the
-    // tool's whole job is "I saw the self-test", and the dashboard's
-    // message log looks tidier with one line than a 3-line JSON blob.
+    // pushes the update to the hub. Idempotent.
     if (name === "_ack_channel") {
       const result = await this.ackChannel();
-      const text = result.already
-        ? "Channel already acknowledged."
-        : "Channel acknowledged.";
-      return { content: [{ type: "text" as const, text }] };
+      return toolResult(result);
     }
 
     if (!this.hubWsUrl) {
