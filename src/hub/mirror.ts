@@ -136,7 +136,16 @@ export function nextActivityState(
   prev: MirrorActivityState,
   kind: MirrorEventFrame["kind"],
   payload: MirrorEventPayload,
+  agentId?: string,
 ): MirrorActivityState {
+  // A sub-agent-tagged frame must never change the parent session's
+  // activity state: the parent Task tool call already flipped it busy,
+  // and a sub-agent finishing (or emitting tool calls of its own) is
+  // not the parent turn ending. Supersedes the narrower
+  // subagent/before_tool_use_id payload check below, which remains as
+  // the fallback for older Claude Code builds that don't tag frames
+  // with agent_id at all.
+  if (agentId) return prev;
   switch (kind) {
     case "user_prompt":
     case "tool_call":
@@ -770,6 +779,7 @@ export class MirrorRegistry {
       entry.activityState,
       frame.kind,
       frame.payload,
+      frame.agent_id,
     );
 
     // Durable write-through. NullStore is a no-op.
@@ -788,6 +798,8 @@ export class MirrorRegistry {
       kind: frame.kind,
       ts: frame.ts,
       payload: frame.payload,
+      ...(frame.agent_id ? { agent_id: frame.agent_id } : {}),
+      ...(frame.agent_type ? { agent_type: frame.agent_type } : {}),
     };
     const payload = JSON.stringify(broadcast);
     for (const watcher of entry.watchers) {
@@ -2402,6 +2414,8 @@ export function wsMirrorPlugin(
               kind: f.kind,
               ts: f.ts,
               payload: f.payload,
+              ...(f.agent_id ? { agent_id: f.agent_id } : {}),
+              ...(f.agent_type ? { agent_type: f.agent_type } : {}),
             })),
           agent_attached: entry.agent !== null,
           statusline: entry.lastStatusline,
