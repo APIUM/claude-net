@@ -722,10 +722,6 @@ export class MirrorRegistry {
       // earlier "Session owner mismatch" 409 that permanently wedged any
       // renamed session whose ccPid couldn't vouch for identity — the
       // session showed offline/no-mirror while Claude ran fine.)
-      // Same (host, ccPid) means the same process. Only that process may
-      // reopen its own closed sid.
-      const identityMatches =
-        existing.ccPid !== null && ccPid !== null && existing.ccPid === ccPid;
       if (existing.closedAt) {
         // A deliberately-severed entry (POST /:sid/close) never comes
         // back, regardless of identity - that's what distinguishes an
@@ -738,25 +734,15 @@ export class MirrorRegistry {
             error: "Session was closed and cannot be reopened.",
           };
         }
-        // A closed sid must not be handed back to a differently-
-        // identified process: known, differing ccPids mean this re-POST is
-        // not the same process the close was for (e.g. it was deliberately
-        // dropped because the old ccPid died), so refuse to resurrect. `existing.ccPid
-        // === null` (pre-rollout) is the one case with no identity to
-        // check, so it keeps the old idempotent-reopen behaviour.
-        const ccPidMismatch =
-          existing.ccPid !== null && ccPid !== null && !identityMatches;
-        if (ccPidMismatch) {
-          return {
-            ok: false,
-            error:
-              "Session was closed and cannot be reclaimed by a different process.",
-          };
-        }
-        // Re-open a closed session when the same owner comes back with
-        // the same sid. Happens after mirror-agent restarts where the
-        // old agent's shutdown sent a /close before the new agent had
-        // the chance to reclaim the session.
+        // Re-open on any re-POST for this sid, adopting whichever process
+        // now holds it. The sid is the identity, and a different ccPid is
+        // the ordinary case for a resume: `claude --resume <sid>` is how
+        // the dashboard's reconnect brings a dead session back, and a
+        // mirror-agent restart re-claims sessions the same way. Refusing
+        // on a pid change leaves the session unmirrored for the whole
+        // retention window while the daemon mints a replacement sid, whose
+        // name then collides with the still-registered original and lands
+        // as a "-2" suffix.
         existing.closedAt = null;
         if (existing.retentionTimerId) {
           clearTimeout(existing.retentionTimerId);

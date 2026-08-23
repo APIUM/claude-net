@@ -1696,11 +1696,11 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
     }
   });
 
-  test("createSession re-POST from a different, unrelated ccPid does not resurrect a closed sid", () => {
-    // A closed entry must not be handed back to a differently-
-    // identified process — e.g. it was deliberately dropped because
-    // the process that held it died, and the sid is now being reused
-    // (or reported) by something else entirely.
+  test("createSession re-POST from a new ccPid re-opens a closed sid and adopts the pid", () => {
+    // A resume (`claude --resume <sid>`, which is what the dashboard's
+    // reconnect runs) comes back on a new process for the same sid. The
+    // entry must reopen and adopt that pid; refusing it would leave the
+    // session unmirrored until the retention window expired.
     const quick = new MirrorRegistry({
       transcriptRing: 10,
       retentionMs: 60_000,
@@ -1725,9 +1725,12 @@ describe("mirror auto-start via POST /api/mirror/session", () => {
         "/home/alice",
         "closed-sid",
         "hostA",
-        222, // different ccPid — not the same process
+        222, // the resuming process
       );
-      expect(reopen.ok).toBe(false);
+      expect(reopen.ok).toBe(true);
+      if (!reopen.ok) return;
+      expect(reopen.entry.closedAt).toBeNull();
+      expect(reopen.entry.ccPid).toBe(222);
     } finally {
       quick.stop();
     }
