@@ -46,12 +46,6 @@ const agentCrashLimiter = new RateLimiter({ max: 5, windowMs: 60_000 });
 // loop on the receiver doesn't fan out unbounded notifications.
 const apiErrorLimiter = new RateLimiter({ max: 30, windowMs: 60_000 });
 
-// Dashboard diagnostic dumps. A browser reports its own navigation and
-// socket lifecycle when a session attach stalls; the ceiling keeps a
-// looping tab from filling the log ring.
-const clientDiagLimiter = new RateLimiter({ max: 6, windowMs: 60_000 });
-const CLIENT_DIAG_MAX_ENTRIES = 300;
-
 /**
  * Maximum age of a `message.sent` event we'll correlate to an incoming
  * api-error report. The receiver's CC makes its next API call within
@@ -357,50 +351,6 @@ export function apiPlugin(deps: ApiDeps): Elysia {
               ? payload.ts
               : new Date().toISOString(),
         });
-        return { ok: true };
-      })
-
-      // POST /api/client-diag — a dashboard tab reports its own recent
-      // navigation and socket lifecycle. Written to stderr so it lands in
-      // the log ring and is readable over GET /api/logs: the sidebar-stall
-      // failure is a browser-side condition the hub cannot otherwise see.
-      .post("/client-diag", ({ body, set, request }) => {
-        const remote = remoteKeyFor(request);
-        if (!clientDiagLimiter.allow(remote)) {
-          const waitMs = clientDiagLimiter.retryAfterMs(remote);
-          set.status = 429;
-          set.headers["retry-after"] = String(
-            Math.max(1, Math.ceil(waitMs / 1000)),
-          );
-          return { error: "Rate limit exceeded." };
-        }
-        const payload = body as Record<string, unknown>;
-        if (!payload || typeof payload !== "object") {
-          set.status = 400;
-          return { error: "Expected JSON body" };
-        }
-        const reason =
-          typeof payload.reason === "string"
-            ? payload.reason.slice(0, 64)
-            : "unknown";
-        const entries = Array.isArray(payload.entries)
-          ? payload.entries.slice(-CLIENT_DIAG_MAX_ENTRIES)
-          : [];
-        const label =
-          typeof payload.label === "string" ? payload.label.slice(0, 120) : "";
-        process.stderr.write(
-          `[claude-net/client-diag] reason=${reason} entries=${entries.length} ${label}\n`,
-        );
-        for (const raw of entries) {
-          const e = raw as Record<string, unknown>;
-          const ts = typeof e.t === "number" ? new Date(e.t).toISOString() : "";
-          const tag = typeof e.tag === "string" ? e.tag.slice(0, 40) : "?";
-          const detail =
-            typeof e.d === "string" ? e.d.slice(0, 200) : String(e.d ?? "");
-          process.stderr.write(
-            `[claude-net/client-diag]   ${ts} ${tag} ${detail}\n`,
-          );
-        }
         return { ok: true };
       })
 
