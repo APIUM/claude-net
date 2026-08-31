@@ -2269,7 +2269,7 @@
      mostly solid (~70% of the cycle) and dips twice in quick
      succession, then rests.
 
-     Infinite by design: renderAgents() rebuilds the sidebar via
+     Infinite by design: paintAgents() rebuilds the sidebar via
      innerHTML on every mirror:activity, which would restart any
      iteration-capped animation across ALL sessions whenever ANY
      session emits a frame — making a finite count behave erratically.
@@ -2874,6 +2874,7 @@
     text-transform: uppercase;
     color: var(--text-dim);
   }
+  #mirror-conn { cursor: pointer; }
   #mirror-conn.is-live { color: var(--text-accent); animation: live-pulse 1.4s ease-in-out infinite; }
   #mirror-conn.is-warn { color: var(--gold); }
   #mirror-conn.is-error { color: var(--text-accent); }
@@ -3078,7 +3079,7 @@
       <div class="cn-header d-none" data-header-mode="mirror">
         <span class="cn-header-title" id="mirror-owner"></span>
         <span class="cn-header-sub cwd" id="mirror-cwd"></span>
-        <span id="mirror-conn">connecting…</span>
+        <span id="mirror-conn" title="Click to send a diagnostic snapshot to the hub">connecting…</span>
         <div class="cn-mirror-stats d-none" id="mirror-stats" aria-hidden="true">
           <div class="cn-stat" id="mirror-stat-ctx-wrap" title="Context window usage">
             <div class="progress cn-stat-progress">
@@ -3266,6 +3267,15 @@
   document.addEventListener('click', function(e) {
     if (e.target.closest && e.target.closest('[data-theme-toggle]')) toggleTheme();
   });
+
+  // Manual diagnostic trigger — the connection badge is next to the
+  // symptom, so it is where someone reaches when the pane looks wrong.
+  document.addEventListener('click', function(e) {
+    if (!(e.target.closest && e.target.closest('#mirror-conn'))) return;
+    cnDiag('manual.trigger', 'pane=' + ((document.getElementById('mirror-owner') || {}).textContent || ''));
+    cnDiagSend('manual', true);
+    if (typeof cnToast === 'function') cnToast('Diagnostic snapshot sent to the hub.', 'ok');
+  });
   syncThemeLabel();
 
   // --- Tool-call visibility toggle ---
@@ -3334,10 +3344,50 @@
   const messageLogBuffer = []; // { from, to, type, content, routeType, timestamp }
   const MAX_LOG_ENTRIES = 500;
   const RECONNECT_INTERVAL = 3000;
+
+  // ── Client diagnostics ────────────────────────────────────────────
+  // The sidebar-stall failure is a browser-side condition — the hub sees
+  // a healthy socket while the tab shows a session it never attached to —
+  // and it is not reproducible on demand. Record navigation and socket
+  // lifecycle into a ring and POST it to the hub when an attach stalls,
+  // or on demand by clicking the connection badge. Entries land in the
+  // hub log ring, readable over GET /api/logs.
+  var CN_DIAG_MAX = 250;
+  var cnDiagRing = [];
+  var cnDiagLastSend = 0;
+  var cnDiagPending = null; // reason held over while the network is down
+  var CN_DIAG_MIN_GAP_MS = 20000;
+  function cnDiag(tag, detail) {
+    cnDiagRing.push({ t: Date.now(), tag: tag, d: detail === undefined ? '' : String(detail) });
+    if (cnDiagRing.length > CN_DIAG_MAX) cnDiagRing.shift();
+  }
+  function cnDiagSend(reason, force) {
+    var now = Date.now();
+    if (!force && now - cnDiagLastSend < CN_DIAG_MIN_GAP_MS) { cnDiagPending = reason; return; }
+    cnDiagLastSend = now;
+    cnDiagPending = null;
+    var body = JSON.stringify({
+      reason: reason,
+      label: 'hash=' + (window.location.hash || '(none)') + ' ua=' + navigator.userAgent.slice(0, 60),
+      entries: cnDiagRing.slice(),
+    });
+    try {
+      fetch('/api/client-diag', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: body,
+      }).catch(function() { cnDiagPending = reason; });
+    } catch (e) { cnDiagPending = reason; }
+  }
+  // Readable from the console when someone has devtools open.
+  window.cnDiagDump = function() {
+    return cnDiagRing.map(function(e) {
+      return new Date(e.t).toISOString().slice(11, 23) + ' ' + e.tag + ' ' + e.d;
+    }).join('\n');
+  };
+  window.cnDiagSend = function() { cnDiagSend('manual', true); return 'sent'; };
   // Trailing-edge debounce: a burst of events (host:connected +
   // mirror:session_started + agent:connected fired when a mirror-agent
   // reconnects) all coalesce into a single render after 150ms of quiet.
-  // renderAgents() rebuilds the sidebar via innerHTML, so each call
+  // paintAgents() rebuilds the sidebar via innerHTML, so each call
   // destroys/recreates animation state — debouncing eliminates the
   // visible flicker that comes from rapid back-to-back rebuilds.
   var renderAgentsTimer = null;
@@ -3345,6 +3395,40 @@
     if (renderAgentsTimer) clearTimeout(renderAgentsTimer);
     renderAgentsTimer = setTimeout(function() { renderAgentsTimer = null; renderAgents(); }, 150);
   }
+
+  // A repaint replaces every row node. A browser only synthesises `click`
+  // when mousedown and mouseup land on the same live node, so a repaint
+  // between the two drops the click entirely and the row never navigates.
+  // Hold repaints while a pointer is pressed on the sidebar and flush on
+  // release. The flush is a macrotask so the click (which follows pointerup
+  // synchronously) still sees the row it was pressed on.
+  var agentsRepaintHeld = false;
+  var agentsRepaintPending = false;
+  var agentsRepaintWatchdog = null;
+  // Release outside the window can swallow pointerup; without this the
+  // sidebar would stay frozen for the rest of the page's life.
+  var AGENTS_REPAINT_HOLD_MAX_MS = 3000;
+  function renderAgents() {
+    if (agentsRepaintHeld) { agentsRepaintPending = true; return; }
+    paintAgents();
+  }
+  function releaseAgentsRepaint() {
+    if (agentsRepaintWatchdog) { clearTimeout(agentsRepaintWatchdog); agentsRepaintWatchdog = null; }
+    if (!agentsRepaintHeld) return;
+    agentsRepaintHeld = false;
+    if (agentsRepaintPending) {
+      agentsRepaintPending = false;
+      setTimeout(paintAgents, 0);
+    }
+  }
+  document.addEventListener('pointerdown', function(e) {
+    if (!(e.target.closest && e.target.closest('#agent-list'))) return;
+    agentsRepaintHeld = true;
+    if (agentsRepaintWatchdog) clearTimeout(agentsRepaintWatchdog);
+    agentsRepaintWatchdog = setTimeout(releaseAgentsRepaint, AGENTS_REPAINT_HOLD_MAX_MS);
+  }, true);
+  document.addEventListener('pointerup', releaseAgentsRepaint, true);
+  document.addEventListener('pointercancel', releaseAgentsRepaint, true);
 
   // --- DOM refs ---
   const agentListEl = document.getElementById('agent-list');
@@ -3368,6 +3452,9 @@
 
     ws.onopen = function() {
       setConnected(true);
+      cnDiag('dash.open');
+      // A stall report queued while the network was down goes out now.
+      if (cnDiagPending) cnDiagSend(cnDiagPending, true);
       if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
       refreshMirrorSessions();
       refreshAgents();
@@ -3667,7 +3754,7 @@
   // extra row at the end of their host group. This handles the case
   // where several claude processes in the same cwd share one
   // owner_agent — each session gets its own row regardless.
-  function renderAgents() {
+  function paintAgents() {
     // Bucket mirror sessions by host (derived from owner_agent's user@host
     // suffix). Dead sessions (closed, or source-detached) stay listed —
     // dimmed and reconnectable — until the hub ages them out of retention.
@@ -4054,6 +4141,7 @@
 
   function applyHashRoute() {
     var route = sidFromHash();
+    cnDiag('route', route ? (route.sid || '').slice(0, 8) + ' host=' + (route.host || '-') : '(log)');
     if (!route) {
       detachMirror();
       showMessageLogView();
@@ -4064,6 +4152,7 @@
     var hostHint = route.host;
     // Valid sid: must match a known mirror session.
     var known = !!findMirrorEntry(sid, hostHint);
+    cnDiag('route.known', String(known));
     if (!known) {
       // Might be an early page-load race where the session list hasn't
       // arrived yet. Fetch + retry once, then fall back.
@@ -4118,6 +4207,11 @@
       dismissMobileSidebar();
     }
     var agentRow = e.target.closest && e.target.closest('#agent-list .list-group-item.agent-item');
+    if (agentRow) {
+      cnDiag('click.row', (agentRow.getAttribute('data-sid') || '').slice(0, 8)
+        + ' name=' + (agentRow.getAttribute('data-name') || '')
+        + ' href=' + (agentRow.getAttribute('href') || '(none)'));
+    }
     if (agentRow && agentRow.getAttribute('href')) {
       // Let the href change the hash; then close the mobile offcanvas.
       dismissMobileSidebar();
@@ -5069,6 +5163,9 @@
   function attachMirror(sid, hostHint) {
     detachMirror();
     activeAgentSid = sid;
+    var attachStartedAt = Date.now();
+    var initSeen = false;
+    cnDiag('attach', sid.slice(0, 8));
     // Host context for cross-host UUID disambiguation. When known, we
     // append `&host=<host>` to every mirror REST/WS URL so the hub
     // can resolve unambiguously when two hosts hold the same sid.
@@ -8311,6 +8408,10 @@
     }
 
     function applyInit(msg) {
+      initSeen = true;
+      if (mInitWatchdog) { clearTimeout(mInitWatchdog); mInitWatchdog = null; }
+      cnDiag('mws.init', (msg.sid || '').slice(0, 8) + ' +' + (Date.now() - attachStartedAt) + 'ms'
+        + ' frames=' + ((msg.transcript && msg.transcript.length) || 0));
       cwdEl.textContent = msg.cwd || '';
       ownerEl.textContent = msg.owner_agent || '';
       // `agent_attached` is omitted by pre-rollout hubs — default to true
@@ -8407,6 +8508,9 @@
 
     var mws = null;
     var mReconnectTimer = null;
+    var mConnectTimeout = null;
+    var MIRROR_CONNECT_TIMEOUT_MS = 8000;
+    var MIRROR_INIT_STALL_MS = 12000;
     var teardownCalled = false;
     function mConnect() {
       if (teardownCalled) return;
@@ -8421,7 +8525,24 @@
         statusEl.textContent = 'Failed to open WebSocket: ' + (e && e.message ? e.message : e);
         return;
       }
+      // A connection that is dropping packets rather than refusing them
+      // stays in CONNECTING for as long as the OS keeps retransmitting —
+      // minutes, with no onclose and so no reconnect. Bound the wait and
+      // force the close ourselves; onclose then drives the normal retry.
+      if (mConnectTimeout) clearTimeout(mConnectTimeout);
+      mConnectTimeout = setTimeout(function() {
+        mConnectTimeout = null;
+        if (teardownCalled) return;
+        if (!mws || mws.readyState === 1) return;
+        statusEl.className = 'mirror-status error';
+        statusEl.textContent = 'Connection timed out — retrying…';
+        cnDiag('mws.timeout', 'readyState=' + (mws && mws.readyState));
+        cnDiagSend('attach-stalled');
+        try { mws.close(); } catch (e) { /* ignore */ }
+      }, MIRROR_CONNECT_TIMEOUT_MS);
       mws.onopen = function() {
+        if (mConnectTimeout) { clearTimeout(mConnectTimeout); mConnectTimeout = null; }
+        cnDiag('mws.open', '+' + (Date.now() - attachStartedAt) + 'ms');
         watcherConnected = true;
         refreshConnState();
         statusEl.textContent = '';
@@ -8460,7 +8581,9 @@
           statusEl.textContent = msg.message || 'error';
         }
       };
-      mws.onclose = function() {
+      mws.onclose = function(ev) {
+        cnDiag('mws.close', 'code=' + (ev && ev.code) + ' clean=' + !!(ev && ev.wasClean)
+          + ' init=' + initSeen + ' +' + (Date.now() - attachStartedAt) + 'ms');
         watcherConnected = false;
         setConnState('offline');
         if (teardownCalled) return;
@@ -8469,7 +8592,28 @@
       };
       mws.onerror = function() { /* close will follow */ };
     }
+    // The pane's header and transcript are otherwise written only by
+    // applyInit, i.e. only once mirror:init arrives. A socket that stalls
+    // (a black-holed connection never fires onclose) would leave the
+    // PREVIOUS session on screen indefinitely, so every click reads as
+    // "nothing happened". Paint what the sidebar already knows now; init
+    // overwrites it with the authoritative copy when it lands.
+    ownerEl.textContent = (resolvedEntry && resolvedEntry.owner_agent) || '';
+    cwdEl.textContent = (resolvedEntry && resolvedEntry.cwd) || '';
+    transcriptEl.innerHTML = '';
+    rendered = Object.create(null);
+    activeSubagents = Object.create(null);
+    resetAgentTabsUi();
+    disconnectTailObserver();
+
     mConnect();
+    var mInitWatchdog = setTimeout(function() {
+      mInitWatchdog = null;
+      if (teardownCalled || initSeen) return;
+      cnDiag('attach.stall', sid.slice(0, 8) + ' no init after ' + MIRROR_INIT_STALL_MS + 'ms'
+        + ' wsState=' + (mws && mws.readyState));
+      cnDiagSend('no-init');
+    }, MIRROR_INIT_STALL_MS);
 
     // Wire up the teardown closure so a subsequent attach (or detach) can
     // shut this session down cleanly. `attachAc.abort()` unbinds every
@@ -8481,6 +8625,8 @@
       try { attachAc.abort(); } catch (e) { /* ignore */ }
       closeImageLightbox();
       if (mReconnectTimer) { clearTimeout(mReconnectTimer); mReconnectTimer = null; }
+      if (mConnectTimeout) { clearTimeout(mConnectTimeout); mConnectTimeout = null; }
+      if (mInitWatchdog) { clearTimeout(mInitWatchdog); mInitWatchdog = null; }
       if (virtualizeTimer) { clearTimeout(virtualizeTimer); virtualizeTimer = null; }
       if (thinkingTicker) { clearInterval(thinkingTicker); thinkingTicker = null; }
       // Delayed-send: stop the countdown ticker and wipe the per-session
