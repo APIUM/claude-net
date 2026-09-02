@@ -251,6 +251,72 @@ describe("ingestHook", () => {
     expect(typeof out.frame.ts).toBe("number");
   });
 
+  describe("config dir signals", () => {
+    test("configDirHint is derived from transcript_path", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        transcript_path:
+          "/home/alice/.claude-personal/projects/-home-alice-work/s-1.jsonl",
+      });
+      expect(out?.configDirHint).toBe("/home/alice/.claude-personal");
+    });
+
+    test("configDirHint falls back to agent_transcript_path when transcript_path is absent", () => {
+      const out = ingestHook({
+        hook_event_name: "SubagentStop",
+        session_id: "s-1",
+        last_assistant_message: "done",
+        stop_reason: "end_turn",
+        agent_id: "agent-7",
+        agent_transcript_path:
+          "/home/alice/.claude/projects/-home-alice-work/s-1/subagents/agent-agent-7.jsonl",
+      });
+      expect(out?.configDirHint).toBe("/home/alice/.claude");
+    });
+
+    test("configDirHint is undefined when neither path has a /projects/ segment", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        transcript_path: "/tmp/scratch.jsonl",
+      });
+      expect(out?.configDirHint).toBeUndefined();
+    });
+
+    test("mirrorEnvConfigDir is read from _mirror_env.CLAUDE_CONFIG_DIR", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        _mirror_env: { CLAUDE_CONFIG_DIR: "/home/alice/.claude-personal" },
+      });
+      expect(out?.mirrorEnvConfigDir).toBe("/home/alice/.claude-personal");
+    });
+
+    test("mirrorEnvConfigDir is undefined when _mirror_env has an empty string", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+        _mirror_env: { CLAUDE_CONFIG_DIR: "" },
+      });
+      expect(out?.mirrorEnvConfigDir).toBeUndefined();
+    });
+
+    test("both signals are undefined when absent from the payload", () => {
+      const out = ingestHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "s-1",
+        prompt: "hi",
+      });
+      expect(out?.configDirHint).toBeUndefined();
+      expect(out?.mirrorEnvConfigDir).toBeUndefined();
+    });
+  });
+
   describe("PostToolUse — image content blocks", () => {
     // 1×1 transparent PNG. Small enough that any sane cap admits it.
     const TINY_PNG_B64 =
