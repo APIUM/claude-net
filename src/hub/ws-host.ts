@@ -148,6 +148,18 @@ export function wsHostPlugin(
         return;
       }
 
+      // Config-dir list update, sent whenever a rescan finds a change.
+      // Not tied to any pending RPC - update the entry directly and
+      // rebroadcast to dashboards.
+      if (frame.action === "host_config_dirs") {
+        const meta = connMeta.get(ws.raw);
+        if (meta && Array.isArray(frame.config_dirs)) {
+          // biome-ignore lint/suspicious/noExplicitAny: validated at runtime by HostRegistry (array shape only)
+          hostRegistry.updateConfigDirs(meta.hostId, frame.config_dirs as any);
+        }
+        return;
+      }
+
       // Unknown frames from the daemon are ignored — tolerates version skew.
     },
 

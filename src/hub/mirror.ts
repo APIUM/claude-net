@@ -135,6 +135,10 @@ export interface MirrorSessionEntry {
    * when unknown (pre-rollout hook wrapper).
    */
   ccPid: number | null;
+  /** Account config dir the mirror-agent reported on session POST. Empty
+   *  string when unknown (pre-rollout client) - treat as the default
+   *  account. */
+  configDir: string;
   createdAt: Date;
   lastEventAt: Date;
   transcript: MirrorEventFrame[];
@@ -1049,6 +1053,7 @@ export class MirrorRegistry {
     host = "",
     ccPid: number | null = null,
     sidSource?: SidSource,
+    configDir = "",
   ):
     | { ok: true; entry: MirrorSessionEntry; restored: boolean }
     | { ok: false; error: string } {
@@ -1110,6 +1115,11 @@ export class MirrorRegistry {
           existing.retentionTimerId = null;
         }
       }
+      // A pre-rollout daemon's re-POST has no config_dir; don't let
+      // its absence clobber a value we already learned.
+      if (configDir && existing.configDir !== configDir) {
+        existing.configDir = configDir;
+      }
       this.reconcileIdentity(existing, host, ccPid);
       return {
         ok: true,
@@ -1154,6 +1164,7 @@ export class MirrorRegistry {
       cwd,
       host,
       ccPid,
+      configDir,
       createdAt: now,
       lastEventAt: now,
       transcript: [],
@@ -1174,6 +1185,7 @@ export class MirrorRegistry {
       owner_agent: resolvedOwner,
       cwd,
       created_at: now.toISOString(),
+      ...(configDir ? { config_dir: configDir } : {}),
     });
 
     this.dashboardBroadcast({
@@ -2260,6 +2272,7 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
       now,
     ),
     background: prunePendingBackground(entry.pendingBackground, now),
+    ...(entry.configDir ? { config_dir: entry.configDir } : {}),
   };
 }
 
@@ -2287,6 +2300,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           host?: string;
           cc_pid?: number | null;
           sid_source?: string;
+          config_dir?: string;
         };
         if (!payload.owner_agent || !payload.cwd) {
           set.status = 400;
@@ -2328,6 +2342,8 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         const sidSource = VALID_SID_SOURCES.has(payload.sid_source as SidSource)
           ? (payload.sid_source as SidSource)
           : undefined;
+        const configDir =
+          typeof payload.config_dir === "string" ? payload.config_dir : "";
         const result = mirrorRegistry.createSession(
           payload.owner_agent,
           payload.cwd,
@@ -2335,6 +2351,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
           host,
           ccPid,
           sidSource,
+          configDir,
         );
         if (!result.ok) {
           set.status = 409;
@@ -2868,6 +2885,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         const r = await launchOnHost(hostRegistry, hostId, {
           cwd: entry.cwd,
           resume_sid: entry.sid,
+          config_dir: entry.configDir || undefined,
         });
         // A missing host means the daemon isn't connected — surface it as
         // 503 (offline) rather than the generic 404 launchOnHost uses.
