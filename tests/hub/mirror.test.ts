@@ -62,6 +62,53 @@ describe("MirrorRegistry", () => {
     expect(reg.sessions.size).toBe(1);
   });
 
+  test("createSession stores configDir on the entry and surfaces it in the summary", () => {
+    const r = reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-cfg",
+      "h",
+      null,
+      undefined,
+      "/home/alice/.claude-personal",
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.entry.configDir).toBe("/home/alice/.claude-personal");
+    const summary = reg.listAll().find((s) => s.sid === "sid-cfg");
+    expect(summary?.config_dir).toBe("/home/alice/.claude-personal");
+  });
+
+  test("createSession defaults configDir to empty string, omitted from the summary", () => {
+    const r = reg.createSession("alice:u@h", "/home/alice", "sid-nocfg");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.entry.configDir).toBe("");
+    const summary = reg.listAll().find((s) => s.sid === "sid-nocfg");
+    expect(summary?.config_dir).toBeUndefined();
+  });
+
+  test("a re-POST with configDir fills in a previously-unknown value without clobbering a known one", () => {
+    const r1 = reg.createSession("alice:u@h", "/home/alice", "sid-fill", "h");
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.entry.configDir).toBe("");
+
+    // Pre-rollout re-POST (no configDir) must not erase a value once set.
+    reg.createSession(
+      "alice:u@h",
+      "/home/alice",
+      "sid-fill",
+      "h",
+      null,
+      undefined,
+      "/home/alice/.claude",
+    );
+    expect(r1.entry.configDir).toBe("/home/alice/.claude");
+    reg.createSession("alice:u@h", "/home/alice", "sid-fill", "h");
+    expect(r1.entry.configDir).toBe("/home/alice/.claude");
+  });
+
   test("createSession treats a stale owner POST on an existing sid as keep-alive", () => {
     // After an MCP rename the mirror-agent keeps re-POSTing the
     // cwd-derived owner because it doesn't track the chosen label —
