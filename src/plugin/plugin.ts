@@ -321,6 +321,21 @@ export function encodeProjectDirName(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
+/**
+ * This account's config dir: CLAUDE_CONFIG_DIR from `env` when set, else
+ * <home>/.claude. Inlined from src/shared/config-dir.ts's
+ * defaultConfigDir/resolveConfigDir - the plugin is served as a single
+ * file and cannot import project-local code. The plugin runs as Claude
+ * Code's own MCP child process, so its own `process.env` already declares
+ * whichever account launched it - no hook payload or /proc lookup needed,
+ * unlike the mirror-agent's cross-process resolution.
+ */
+export function resolveConfigDir(env: NodeJS.ProcessEnv, home: string): string {
+  const raw = env.CLAUDE_CONFIG_DIR;
+  if (typeof raw === "string" && raw.trim().length > 0) return raw;
+  return path.join(home, ".claude");
+}
+
 export interface DiscoveredSession {
   sessionId: string;
   transcriptPath: string;
@@ -517,11 +532,11 @@ export function findActiveSessionForCcPid(
   ccPid: number,
   cwd: string,
   home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): DiscoveredSession | null {
   if (!cwd) return null;
   const projectDir = path.join(
-    home,
-    ".claude",
+    resolveConfigDir(env, home),
     "projects",
     encodeProjectDirName(cwd),
   );
@@ -648,10 +663,10 @@ function persistedNamePath(
   sessionId: string,
   cwd: string,
   home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
   return path.join(
-    home,
-    ".claude",
+    resolveConfigDir(env, home),
     "projects",
     encodeProjectDirName(cwd),
     `${sessionId}.claude-net.json`,
@@ -662,10 +677,11 @@ export function readPersistedAgentName(
   sessionId: string,
   cwd: string,
   home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): PersistedAgentName | null {
   try {
     const raw = fs.readFileSync(
-      persistedNamePath(sessionId, cwd, home),
+      persistedNamePath(sessionId, cwd, home, env),
       "utf8",
     );
     const obj = JSON.parse(raw);
@@ -690,8 +706,9 @@ export function writePersistedAgentName(
   name: string,
   ts: number,
   home: string = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): void {
-  const file = persistedNamePath(sessionId, cwd, home);
+  const file = persistedNamePath(sessionId, cwd, home, env);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ name, ts }));
