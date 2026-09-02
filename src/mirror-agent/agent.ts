@@ -18,6 +18,11 @@ import type {
   MirrorStatuslineFrame,
   SidSource,
 } from "@/shared/types";
+import {
+  configDirFromTranscriptPath,
+  defaultConfigDir,
+  resolveConfigDir,
+} from "../shared/config-dir";
 import { scanCommands } from "./command-scanner";
 import { type RawHookPayload, ingestHook } from "./hook-ingest";
 import { type HostChannelHandle, startHostChannel } from "./host-channel";
@@ -53,6 +58,10 @@ interface SessionState {
   /** Host this mirror-agent is running on — sent with every session POST
    *  so the hub can join mirror sessions to MCP agents by (host, ccPid). */
   host: string;
+  /** Account config dir this session belongs to (e.g. <home>/.claude, or
+   *  <home>/.claude-personal). Resolved once at session open and sent
+   *  alongside the session POST so the dashboard can group by account. */
+  configDir: string;
   /** PID of the Claude Code process that owns this session. null if the
    *  hook wrapper didn't supply it (pre-CC_PID rollout). */
   ccPid: number | null;
@@ -309,6 +318,17 @@ function clampAssistantText(s: string): { value: string; truncated: boolean } {
 }
 
 export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
+  // The daemon's own CLAUDE_CONFIG_DIR (inherited from whichever shell
+  // spawned it) must never leak into a spawned child's environment: every
+  // account's config dir is resolved per-session below, and every child
+  // process this daemon spawns builds its env explicitly (see
+  // host-channel.ts). Deleting it here is the backstop for the case that
+  // matters most - the tmux server's global environment, and thus every
+  // subsequent `tmux new-session`, is seeded from whichever shell first
+  // started it.
+  // biome-ignore lint/performance/noDelete: mutates the live process env, not a rebuildable object
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = os.homedir();
   const hubUrl = config.hubUrl.replace(/\/+$/, "");
   const bindHost = config.bindHost ?? "127.0.0.1";
   const stateDir = config.stateDir ?? "/tmp/claude-net";
@@ -333,7 +353,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   const injector = new TmuxInjector();
   const redactor = new Redactor({
     configPaths: defaultConfigPaths(
-      os.homedir(),
+      home,
       process.env.CLAUDE_NET_PROJECT_DIR ?? process.cwd(),
     ),
   });
@@ -379,6 +399,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   // accepts ls/mkdir/launch RPCs and session probes from the hub.
   const hostChannel: HostChannelHandle = startHostChannel({
     hubUrl,
+    home,
     getRecentCwds: () =>
       [...sessions.values()]
         .filter((s) => s.cwd)
@@ -408,6 +429,17 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       for (const cwd of discoverRunningCcCwds()) cwds.add(cwd);
       return cwds;
     },
+    // Config dirs actually in use by a live session, unioned into the
+    // discovered `.claude-*` list so an account CLAUDE_CONFIG_DIR points
+    // somewhere `discoverConfigDirs` wouldn't find on its own still shows
+    // up in `host_config_dirs`.
+    getLiveConfigDirs: () => {
+      const dirs = new Set<string>();
+      for (const s of sessions.values()) {
+        if (!s.closed && s.configDir) dirs.add(s.configDir);
+      }
+      return dirs;
+    },
     redact: (text) => redactor.redactText(text),
     onSessionProbe: (ccPid, cwd) => {
       // Skip if an active session for this ccPid already exists.
@@ -416,11 +448,19 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       }
       // Skip if a probe is in-flight or recently failed (cooldown).
       if (probeAttempts.shouldSkip(ccPid)) return;
+      // No hook payload exists yet for this pid, so the config dir comes
+      // from /proc/<ccPid>/environ (falling back to the default account).
+      const probeConfigDir = resolveHookConfigDir(
+        undefined,
+        undefined,
+        ccPid,
+        home,
+      );
       // Discover the CC's real session_id + transcript path from disk
       // so the probe row converges with the hook-fired session. Only a
       // confident discovery creates a session; anything weaker abstains
       // below and defers to the CC's first hook.
-      let discovered = findActiveSessionForCcPid(ccPid, cwd);
+      let discovered = findActiveSessionForCcPid(ccPid, cwd, probeConfigDir);
       // Guard the mtime-fallback collision: two CC processes in one cwd can
       // resolve to the same transcript. If the discovered sid is already
       // live-bound to a DIFFERENT pid, don't reuse it (that would silently
@@ -468,6 +508,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         tmuxPane,
         ccPid,
         discovered.source,
+        probeConfigDir,
       )
         .then((session) => {
           if (session) {
@@ -495,10 +536,8 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   // fresh process, but a future caller might preload entries).
   void (async () => {
     sessionIndex.load();
-    const candidates = discoverRunningCcSessions(
-      "/proc",
-      os.homedir(),
-      (ccPid, cwd) => sessionIndex.get(ccPid, cwd),
+    const candidates = discoverRunningCcSessions("/proc", home, (ccPid, cwd) =>
+      sessionIndex.get(ccPid, cwd),
     );
     if (candidates.length === 0) return;
     const fromIndex = candidates.filter((c) => c.fromIndex).length;
@@ -516,6 +555,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           c.tmuxPane,
           c.ccPid,
           c.source,
+          c.configDir,
         );
       } catch (err) {
         log(
@@ -771,6 +811,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
         ingested.tmuxPane,
         ingested.ccPid,
         "hook",
+        resolveHookConfigDir(
+          ingested.configDirHint,
+          ingested.mirrorEnvConfigDir,
+          ingested.ccPid,
+          home,
+        ),
       );
       if (!session) {
         return new Response("hub unavailable", { status: 503 });
@@ -952,6 +998,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     tmuxPane: string | undefined,
     ccPid: number | undefined,
     sidSource: SidSource,
+    configDir: string = defaultConfigDir(home),
   ): Promise<SessionState | null> {
     // Already tracking this session — never re-create it, which would
     // orphan the live tail + HubClient. Reuse the existing state, moving
@@ -983,6 +1030,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       tmuxPane,
       ccPid,
       sidSource,
+      configDir,
     );
     openingSessions.set(sid, p);
     try {
@@ -999,6 +1047,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
     tmuxPane: string | undefined,
     ccPid: number | undefined,
     sidSource: SidSource,
+    configDir: string,
   ): Promise<SessionState | null> {
     let ownerAgent = deriveOwnerAgent(cwd ?? process.cwd());
     const host = os.hostname() || "host";
@@ -1015,6 +1064,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
           host,
           cc_pid: resolvedPid,
           sid_source: sidSource,
+          config_dir: configDir,
         }),
       });
       if (!res.ok) {
@@ -1039,6 +1089,7 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
       ownerAgent,
       cwd: cwd ?? "",
       host,
+      configDir,
       ccPid: resolvedPid,
       sidSource,
       transcriptPath: transcriptPath ?? null,
@@ -1086,6 +1137,10 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
 
     attachHubClient(session);
     startTailIfNeeded(session);
+    // Lets the hub know about an account whose config dir wasn't already
+    // in the discovered/observed list (e.g. CLAUDE_CONFIG_DIR pointing
+    // somewhere the `.claude-*` scan wouldn't find on its own).
+    hostChannel.noteSessionConfigDir(configDir);
 
     log(`[${sid}] session opened for ${ownerAgent}`);
     return session;
@@ -1889,11 +1944,12 @@ export async function startAgent(config: AgentConfig): Promise<AgentHandle> {
   }
 
   /** Respond to a hub-initiated slash-command catalog query. Scans the
-   *  .claude/ trees for this session's cwd and replies with the list. */
+   *  session's own account config dir and its cwd's .claude/ tree and
+   *  replies with the list. */
   function handleListCommands(session: SessionState, requestId: string): void {
     let commands: ReturnType<typeof scanCommands>;
     try {
-      commands = scanCommands(session.cwd);
+      commands = scanCommands(session.cwd, session.configDir);
     } catch (err) {
       const errFrame = {
         action: "mirror_commands_done" as const,
@@ -2369,21 +2425,22 @@ function deriveOwnerAgent(cwd: string): string {
 }
 
 /**
- * Read TMUX_PANE from the process's environ. Linux-only path: parses
- * /proc/<pid>/environ. Returns `undefined` when the file is missing,
- * the env var isn't set (CC not running under tmux), or anything goes
- * wrong reading it. Mirrors the behaviour of the existing hook wrapper
- * (claude-net-mirror-push) which picks the same field out of its own
- * `process.env` — this path just lets the agent see it without
- * waiting for a hook to fire.
+ * Read one variable from a process's environ. Linux-only path: parses
+ * <procRoot>/<pid>/environ. Returns `undefined` when the file is missing,
+ * the variable isn't set, or anything goes wrong reading it.
  */
-export function readTmuxPaneFromCcEnv(ccPid: number): string | undefined {
+function readCcEnvVar(
+  ccPid: number,
+  name: string,
+  procRoot = "/proc",
+): string | undefined {
   if (!Number.isFinite(ccPid) || ccPid <= 0) return undefined;
   try {
-    const raw = fs.readFileSync(`/proc/${ccPid}/environ`, "utf8");
+    const raw = fs.readFileSync(`${procRoot}/${ccPid}/environ`, "utf8");
+    const prefix = `${name}=`;
     for (const entry of raw.split("\0")) {
-      if (entry.startsWith("TMUX_PANE=")) {
-        const value = entry.slice("TMUX_PANE=".length);
+      if (entry.startsWith(prefix)) {
+        const value = entry.slice(prefix.length);
         return value || undefined;
       }
     }
@@ -2391,6 +2448,65 @@ export function readTmuxPaneFromCcEnv(ccPid: number): string | undefined {
     // /proc not available (non-Linux) or pid gone — fall through.
   }
   return undefined;
+}
+
+/**
+ * Read TMUX_PANE from the process's environ. Mirrors the behaviour of the
+ * existing hook wrapper (claude-net-mirror-push) which picks the same
+ * field out of its own `process.env` - this path just lets the agent see
+ * it without waiting for a hook to fire.
+ */
+export function readTmuxPaneFromCcEnv(
+  ccPid: number,
+  procRoot = "/proc",
+): string | undefined {
+  return readCcEnvVar(ccPid, "TMUX_PANE", procRoot);
+}
+
+/**
+ * Read CLAUDE_CONFIG_DIR from the process's environ. Used to resolve a
+ * session's account when no hook payload is available yet (host probe,
+ * startup rediscovery of a not-yet-indexed process).
+ */
+export function readConfigDirFromCcEnv(
+  ccPid: number,
+  procRoot = "/proc",
+): string | undefined {
+  return readCcEnvVar(ccPid, "CLAUDE_CONFIG_DIR", procRoot);
+}
+
+/**
+ * Resolve a session's account config dir, in priority order:
+ *   1. `configDirHint` - configDirFromTranscriptPath applied to whichever
+ *      of transcript_path/agent_transcript_path a hook payload carried.
+ *      The strongest signal: present on every hook once Claude Code has
+ *      written its first transcript line.
+ *   2. `mirrorEnvConfigDir` - CLAUDE_CONFIG_DIR from the hook wrapper's
+ *      own environment (`_mirror_env.CLAUDE_CONFIG_DIR`).
+ *   3. `<procRoot>/<ccPid>/environ`, for a session this daemon opens
+ *      without a hook payload at all (host probe, startup rediscovery).
+ *   4. The default account.
+ * Steps 1 and 2 are naturally absent (undefined) for the probe/rediscovery
+ * callers, which fall straight through to steps 3 and 4.
+ */
+export function resolveHookConfigDir(
+  configDirHint: string | undefined,
+  mirrorEnvConfigDir: string | undefined,
+  ccPid: number | undefined,
+  home: string,
+  procRoot = "/proc",
+): string {
+  if (configDirHint)
+    return resolveConfigDir({ CLAUDE_CONFIG_DIR: configDirHint }, home);
+  if (mirrorEnvConfigDir) {
+    return resolveConfigDir({ CLAUDE_CONFIG_DIR: mirrorEnvConfigDir }, home);
+  }
+  if (typeof ccPid === "number") {
+    const fromEnviron = readConfigDirFromCcEnv(ccPid, procRoot);
+    if (fromEnviron)
+      return resolveConfigDir({ CLAUDE_CONFIG_DIR: fromEnviron }, home);
+  }
+  return defaultConfigDir(home);
 }
 
 /**
@@ -2535,13 +2651,12 @@ export function processStartMs(pid: number, procRoot = "/proc"): number | null {
 export function findActiveSessionForCcPid(
   ccPid: number,
   cwd: string,
-  home: string = os.homedir(),
+  configDir: string = defaultConfigDir(os.homedir()),
   procRoot = "/proc",
 ): DiscoveredSession | null {
   if (!cwd) return null;
   const projectDir = path.join(
-    home,
-    ".claude",
+    configDir,
     "projects",
     encodeProjectDirName(cwd),
   );
@@ -2767,6 +2882,8 @@ export interface DiscoveredCcProcess {
   /** Evidence behind the sid - "index" when fromIndex, else whatever
    *  signal the /proc derivation resolved on. */
   source: SidSource;
+  /** Account config dir this process's session belongs to. */
+  configDir: string;
 }
 
 /**
@@ -2832,13 +2949,28 @@ export function discoverRunningCcSessions(
     // and correctly declines to guess, which is what leaves multi-session
     // projects unmirrored until their next hook.
     const indexed = lookupIndex?.(pid, cwd);
+    // An indexed entry already has its transcript path, so its config dir
+    // comes straight from that (step 1 of resolveHookConfigDir, applied
+    // directly rather than through a hook payload). A process discovery
+    // has no transcript path yet - it needs the config dir first, to know
+    // which account's projects/ tree to search - so it falls to the
+    // /proc-environ step.
+    const configDir = indexed
+      ? resolveHookConfigDir(
+          configDirFromTranscriptPath(indexed.transcriptPath) ?? undefined,
+          undefined,
+          pid,
+          home,
+          procRoot,
+        )
+      : resolveHookConfigDir(undefined, undefined, pid, home, procRoot);
     const discovered = indexed
       ? {
           sessionId: indexed.sid,
           transcriptPath: indexed.transcriptPath,
           source: "index" as const,
         }
-      : findActiveSessionForCcPid(pid, cwd, home, procRoot);
+      : findActiveSessionForCcPid(pid, cwd, configDir, procRoot);
     if (!discovered) continue;
     // Two CC processes can share a sid only across hosts (impossible
     // on /proc) or via a fork that we'd resolve to one. Dedup defensively.
@@ -2847,11 +2979,12 @@ export function discoverRunningCcSessions(
     out.push({
       ccPid: pid,
       cwd,
-      tmuxPane: readTmuxPaneFromCcEnv(pid),
+      tmuxPane: readTmuxPaneFromCcEnv(pid, procRoot),
       sessionId: discovered.sessionId,
       transcriptPath: discovered.transcriptPath,
       fromIndex: indexed !== undefined,
       source: discovered.source,
+      configDir,
     });
   }
   return out;
