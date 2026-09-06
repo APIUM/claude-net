@@ -20,11 +20,16 @@ export interface SetupDeps {
 export function setupPlugin(deps: SetupDeps): Elysia {
   const { port } = deps;
 
-  return new Elysia().get("/setup", ({ request, set }) => {
+  return new Elysia().get("/setup", ({ request, query, set }) => {
     const envHost = process.env.CLAUDE_NET_HOST;
     const hubUrl = resolveCanonicalHubUrl(request, envHost, port);
 
     set.headers["content-type"] = "text/plain";
+
+    const runtime = (query as Record<string, string | undefined>).runtime;
+    if (runtime === "mpy") {
+      return mpySetupScript(hubUrl);
+    }
 
     return `#!/bin/bash
 set -euo pipefail
@@ -215,4 +220,185 @@ echo "If anything looks wrong, restore the backup:"
 echo "    cp \$SETTINGS.pre-mirror.bak \$SETTINGS"
 `;
   });
+}
+
+/**
+ * `GET /setup?runtime=mpy` returns a bash script installing the
+ * MicroPython-runtime plugin binary instead of the bun `plugin.ts`
+ * fetch-and-`bun run` path: opt-in only, does not touch `/setup`'s
+ * default behaviour, and only registers the MCP server (it does not
+ * install claude-channels, the mirror agent, or the statusline the
+ * default path sets up). Downloads `claude-net-plugin-linux-x64` to
+ * `~/.claude-net/plugin/` (survives reboots, unlike the bun path's
+ * per-launch `/tmp` fetch), installs a `launch` wrapper that re-checks
+ * freshness against `/plugin-bin/linux-x64/version` only when a hub
+ * upgrade_hint has marked the cache `.stale` (never on every launch;
+ * see claude-net-mpy's Q6 hub-serving spec), and registers the MCP
+ * server as that wrapper so `exec "$BIN" "$@"` at its tail keeps the
+ * same ppid-is-Claude-Code semantics the bun path's
+ * `bash -c '... exec ...'` line relies on.
+ *
+ * `upgrade_hint` (and thus `.stale`) fires off a plugin_version mismatch
+ * against the hub's own `PLUGIN_VERSION_CURRENT` (package.json), which is
+ * deliberately decoupled from what's actually staged at
+ * `bin/claude-net-plugin-linux-x64`: a package.json bump with no
+ * matching binary re-stage is a false positive from this wrapper's point
+ * of view. Rather than trusting the hint, the wrapper compares the
+ * version endpoint's full `{version, sha256, target}` response against
+ * the sidecar recorded at the last successful install: an identical
+ * response means the currently cached binary already matches what the
+ * hub serves, so `.stale` is cleared with no download at all. Only an
+ * actual difference triggers a real refresh, which still re-verifies
+ * sha256 before replacing the cached binary.
+ *
+ * A refresh failure (hub unreachable, sha256 mismatch) is best-effort
+ * when a usable cached binary already exists: it logs to stderr and
+ * falls through to `exec`ing the cached `$BIN` rather than aborting the
+ * whole session. A hard failure is reserved for the one case with
+ * nothing to fall back to: no cached binary and the refresh itself
+ * failed. A persistent failure (misconfigured hub, corrupted artifact)
+ * backs off via a `.refresh-failed` timestamp rather than re-attempting
+ * a full multi-MB download on every single launch.
+ */
+function mpySetupScript(hubUrl: string): string {
+  return `#!/bin/bash
+set -euo pipefail
+# claude-net (MicroPython plugin binary) one-shot installer.
+# Generated dynamically by ${hubUrl}/setup?runtime=mpy; do not cache.
+
+HUB="${hubUrl}"
+DIR="\$HOME/.claude-net/plugin"
+BIN="\$DIR/claude-net-plugin-linux-x64"
+
+mkdir -p "\$DIR"
+
+echo "[1/3] Downloading claude-net-plugin-linux-x64 from \${HUB}…"
+ver=\$(curl -fsSL "\$HUB/plugin-bin/linux-x64/version")
+want_sha=\$(printf '%s' "\$ver" | grep -o '"sha256":"[a-f0-9]*"' | cut -d'"' -f4) || true
+curl -fsSL "\$HUB/plugin-bin/linux-x64" -o "\$BIN.tmp"
+got_sha=\$(sha256sum "\$BIN.tmp" | awk '{print \$1}')
+if [ -z "\$want_sha" ] || [ "\$got_sha" != "\$want_sha" ]; then
+    echo "claude-net: downloaded binary sha256 mismatch (expected '\$want_sha', got '\$got_sha'); aborting install" >&2
+    rm -f "\$BIN.tmp"
+    exit 1
+fi
+chmod +x "\$BIN.tmp"
+mv -f "\$BIN.tmp" "\$BIN"
+echo "\$ver" > "\$DIR/claude-net-plugin-linux-x64.version"
+rm -f "\$DIR/.stale"
+
+echo "[2/3] Installing launch wrapper…"
+cat > "\$DIR/launch" <<'LAUNCH'
+#!/bin/bash
+set -eu
+DIR="\$HOME/.claude-net/plugin"
+BIN="\$DIR/claude-net-plugin-linux-x64"
+VERSION_FILE="\$DIR/claude-net-plugin-linux-x64.version"
+REFRESH_FAILED="\$DIR/.refresh-failed"
+REFRESH_BACKOFF_S=300
+
+# True when a refresh attempt failed recently enough that another one
+# isn't worth the multi-MB download yet (misconfigured hub, corrupted
+# artifact, genuine tampering); a persistent failure would otherwise
+# cost a full download on every single session launch, silently, since
+# nobody watches an MCP server's stderr.
+recently_failed() {
+    [ -f "\$REFRESH_FAILED" ] || return 1
+    local failed_at now elapsed
+    failed_at=\$(cat "\$REFRESH_FAILED" 2>/dev/null || echo 0)
+    case "\$failed_at" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    now=\$(date +%s)
+    elapsed=\$((now - failed_at))
+    [ "\$elapsed" -ge 0 ] && [ "\$elapsed" -lt "\$REFRESH_BACKOFF_S" ]
+}
+
+refresh_binary() {
+    local hub ver have want_sha got_sha
+    hub="\${CLAUDE_NET_HUB:-}"
+    if [ -z "\$hub" ]; then
+        echo "claude-net: CLAUDE_NET_HUB not set; cannot refresh" >&2
+        return 1
+    fi
+    if ! ver=\$(curl -fsSL "\$hub/plugin-bin/linux-x64/version"); then
+        echo "claude-net: failed to reach \$hub/plugin-bin/linux-x64/version" >&2
+        return 1
+    fi
+    have=\$(cat "\$VERSION_FILE" 2>/dev/null || true)
+    if [ -x "\$BIN" ] && [ -n "\$have" ] && [ "\$ver" = "\$have" ]; then
+        # The hub-advertised {version, sha256, target} triple already
+        # matches what's cached: upgrade_hint fired on a hub-side
+        # package.json bump the staged binary hasn't caught up to yet,
+        # not an actual binary change. Nothing to download.
+        rm -f "\$DIR/.stale"
+        return 0
+    fi
+    want_sha=\$(printf '%s' "\$ver" | grep -o '"sha256":"[a-f0-9]*"' | cut -d'"' -f4) || true
+    if ! curl -fsSL "\$hub/plugin-bin/linux-x64" -o "\$BIN.tmp"; then
+        echo "claude-net: failed to download \$hub/plugin-bin/linux-x64" >&2
+        rm -f "\$BIN.tmp"
+        return 1
+    fi
+    got_sha=\$(sha256sum "\$BIN.tmp" | awk '{print \$1}')
+    if [ -z "\$want_sha" ] || [ "\$got_sha" != "\$want_sha" ]; then
+        echo "claude-net: downloaded binary sha256 mismatch (expected '\$want_sha', got '\$got_sha'); discarding download" >&2
+        rm -f "\$BIN.tmp"
+        return 1
+    fi
+    if ! chmod +x "\$BIN.tmp"; then
+        rm -f "\$BIN.tmp"
+        return 1
+    fi
+    if ! mv -f "\$BIN.tmp" "\$BIN"; then
+        rm -f "\$BIN.tmp"
+        return 1
+    fi
+    echo "\$ver" > "\$VERSION_FILE" || true
+    rm -f "\$DIR/.stale"
+    return 0
+}
+
+if [ -f "\$DIR/.stale" ] || [ ! -x "\$BIN" ]; then
+    refreshed=0
+    if recently_failed; then
+        echo "claude-net: skipping refresh (recent failure; backing off)" >&2
+    elif refresh_binary; then
+        rm -f "\$REFRESH_FAILED"
+        refreshed=1
+    else
+        date +%s > "\$REFRESH_FAILED"
+    fi
+    if [ "\$refreshed" != 1 ]; then
+        if [ -x "\$BIN" ]; then
+            echo "claude-net: running the existing cached binary instead" >&2
+        else
+            echo "claude-net: no cached binary is available at \$BIN" >&2
+            exit 1
+        fi
+    fi
+fi
+
+exec "\$BIN" "\$@"
+LAUNCH
+chmod +x "\$DIR/launch"
+
+echo "[3/3] Registering claude-net MCP server…"
+claude mcp remove --scope user claude-net >/dev/null 2>&1 || true
+claude mcp add \\
+    --scope user \\
+    -e CLAUDE_NET_HUB="\$HUB" \\
+    --transport stdio \\
+    claude-net -- "\$HOME/.claude-net/plugin/launch"
+
+echo ""
+echo "Installed the MicroPython claude-net plugin binary at \$DIR."
+echo "This registers ONLY the claude-net MCP server; it does not install"
+echo "claude-channels, the mirror agent, or the statusline (those are"
+echo "part of the default 'curl \$HUB/setup | bash' path, not this one)."
+echo "Launch a new Claude Code session to connect via the claude-net MCP server."
+echo ""
+echo "To revert to the bun-based plugin, re-run:"
+echo "    curl -fsSL \$HUB/setup | bash"
+`;
 }

@@ -123,4 +123,132 @@ describe("Setup endpoint", () => {
     const ct = resp.headers.get("content-type");
     expect(ct).toContain("text/plain");
   });
+
+  describe("?runtime=mpy", () => {
+    test("does not alter the default (no-param) script", async () => {
+      const before = await (await fetch(`${baseUrl}/setup`)).text();
+      await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const after = await (await fetch(`${baseUrl}/setup`)).text();
+      expect(after).toBe(before);
+      expect(after).toContain("bun run");
+      expect(after).not.toContain("plugin-bin");
+    });
+
+    test("installs the plugin binary and launch wrapper, not the bun path", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      expect(resp.status).toBe(200);
+      const body = await resp.text();
+
+      expect(body).toStartWith("#!/bin/bash");
+      expect(body).toContain('DIR="$HOME/.claude-net/plugin"');
+      expect(body).toContain("/plugin-bin/linux-x64");
+      expect(body).toContain("/plugin-bin/linux-x64/version");
+      expect(body).not.toContain("plugin.ts");
+      expect(body).not.toContain("bun run");
+    });
+
+    test("registers the MCP server pointed at the launch wrapper", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+
+      expect(body).toContain("claude mcp remove --scope user claude-net");
+      expect(body).toContain("claude mcp add");
+      expect(body).toContain("CLAUDE_NET_HUB=");
+      expect(body).toContain('claude-net -- "$HOME/.claude-net/plugin/launch"');
+    });
+
+    test("initial install verifies sha256 before trusting the download", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+
+      // The [1/3] download step checks the freshly-downloaded file's
+      // hash against the version endpoint's advertised sha256 before
+      // ever touching the live $BIN via mv -f.
+      const step1End = body.indexOf("[2/3]");
+      const step1 = body.slice(0, step1End);
+      expect(step1).toContain("sha256sum");
+      expect(step1).toContain('"$got_sha" != "$want_sha"');
+      expect(step1).toContain("aborting install");
+      const mismatchIdx = step1.indexOf('"$got_sha" != "$want_sha"');
+      const mvIdx = step1.indexOf('mv -f "$BIN.tmp" "$BIN"', mismatchIdx);
+      expect(mismatchIdx).toBeGreaterThan(-1);
+      expect(mvIdx).toBeGreaterThan(mismatchIdx);
+    });
+
+    test("launch wrapper verifies sha256 and falls back to the cached binary on mismatch", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+
+      expect(body).toContain("sha256sum");
+      expect(body).toContain('"$got_sha" != "$want_sha"');
+      expect(body).toContain("discarding download");
+      expect(body).toContain("running the existing cached binary instead");
+      const mismatchIdx = body.indexOf('"$got_sha" != "$want_sha"');
+      const mvIdx = body.indexOf('mv -f "$BIN.tmp" "$BIN"', mismatchIdx);
+      expect(mismatchIdx).toBeGreaterThan(-1);
+      expect(mvIdx).toBeGreaterThan(mismatchIdx);
+    });
+
+    test("launch wrapper only hard-fails when no cached binary exists", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+      expect(body).toContain("no cached binary is available");
+      // The refresh-failed branch must not exit when a cached binary is
+      // present, the whole point of B1's fallback fix; see
+      // tests/hub/launch-wrapper.test.ts for the executed-not-grepped
+      // verification of this behaviour.
+      expect(body).toContain("running the existing cached binary instead");
+    });
+
+    test("launch wrapper backs off after a persistent refresh failure", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+      // A failed refresh records a timestamp; a subsequent launch within
+      // the backoff window skips re-attempting the download entirely
+      // rather than paying a full multi-MB fetch on every single launch
+      // of a persistently-broken hub. See launch-wrapper.test.ts for the
+      // executed verification (curl invocation count across launches).
+      expect(body).toContain(".refresh-failed");
+      expect(body).toContain("recently_failed");
+      expect(body).toContain("skipping refresh");
+    });
+
+    test("launch wrapper skips redownloading when the cached version already matches the hub", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+      // B3: the wrapper compares the version endpoint's full response
+      // against the locally cached sidecar BEFORE downloading anything;
+      // a hub/binary version mismatch (package.json bumped ahead of the
+      // staged binary) is therefore not, on its own, a reason to
+      // redownload an unchanged binary. See launch-wrapper.test.ts for
+      // the executed verification (zero downloads across repeated
+      // launches against a hub stuck advertising the same triple).
+      const haveIdx = body.indexOf('have=$(cat "$VERSION_FILE"');
+      const shortCircuitIdx = body.indexOf('"$ver" = "$have"', haveIdx);
+      expect(haveIdx).toBeGreaterThan(-1);
+      expect(shortCircuitIdx).toBeGreaterThan(haveIdx);
+    });
+
+    test("launch wrapper execs the binary (forwarding argv) so ppid stays Claude Code's", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+      expect(body).toContain('exec "$BIN" "$@"');
+    });
+
+    test("output explains the partial-install scope and how to revert", async () => {
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+      expect(body).toContain("ONLY the claude-net MCP server");
+      expect(body).toContain("does not install");
+      expect(body).toMatch(/curl -fsSL \$HUB\/setup \| bash/);
+    });
+
+    test("respects CLAUDE_NET_HOST like the default path", async () => {
+      process.env.CLAUDE_NET_HOST = "https://localhost:9443";
+      const resp = await fetch(`${baseUrl}/setup?runtime=mpy`);
+      const body = await resp.text();
+      expect(body).toContain('HUB="https://localhost:9443"');
+      process.env.CLAUDE_NET_HOST = undefined;
+    });
+  });
 });
