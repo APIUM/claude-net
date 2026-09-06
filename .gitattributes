@@ -1,0 +1,7 @@
+# The claude-net-mpy plugin binary (and any future non-linux-x64 siblings)
+# staged by scripts/sync-plugin-binary.sh — a multi-MB build artifact, not
+# source. The `.version` sidecar next to it is a plain few-byte text file
+# and is explicitly excluded below; it gets no benefit from LFS and stays
+# readable as a normal git blob.
+bin/claude-net-plugin-* filter=lfs diff=lfs merge=lfs -text
+bin/claude-net-plugin-*.version -filter -diff -merge text

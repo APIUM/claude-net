@@ -10,6 +10,7 @@ import { LogRing, captureProcessOutput } from "./log-ring";
 import { type LoopLagMonitor, startLoopLagMonitor } from "./loop-lag";
 import { MirrorRegistry, mirrorPlugin, wsMirrorPlugin } from "./mirror";
 import { createStoreFromEnv } from "./mirror-store";
+import { pluginBinServerPlugin } from "./plugin-bin-server";
 import { Registry } from "./registry";
 import { Router } from "./router";
 import { Scheduler } from "./scheduler";
@@ -326,6 +327,7 @@ export function createHub(options: CreateHubOptions = {}): Hub {
     )
     .use(hostPlugin({ hostRegistry }))
     .use(binServerPlugin({ repoRoot, commitHash }))
+    .use(pluginBinServerPlugin({ repoRoot }))
     .use(setupPlugin({ port: Number(process.env.CLAUDE_NET_PORT) || 4815 }));
 
   app = wsPlugin(

@@ -19,7 +19,16 @@ jobs:
       packages: write
 
     steps:
+      # lfs: true is required so bin/claude-net-plugin-linux-x64 (Git
+      # LFS-tracked; see .gitattributes) is checked out as the real
+      # binary rather than left as its ~130-byte pointer text. Without
+      # this, the image ships the pointer file at that path, and
+      # plugin-bin-server.ts would serve it to clients as if it were the
+      # binary (see the pointer-detection guard in plugin-bin-server.ts
+      # for the server-side backstop against exactly that).
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: docker/login-action@v3
         with:
