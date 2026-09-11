@@ -149,10 +149,10 @@ describe("computeConfigDirs", () => {
     });
   });
 
-  test("discovers a .claude-* sibling with a settings.json", () => {
+  test("discovers a .claude-* sibling with its own .claude.json", () => {
     const personal = path.join(home, ".claude-personal");
     fs.mkdirSync(personal, { recursive: true });
-    fs.writeFileSync(path.join(personal, "settings.json"), "{}");
+    fs.writeFileSync(path.join(personal, ".claude.json"), "{}");
     const dirs = computeConfigDirs(home, new Set());
     expect(dirs.map((d) => d.path)).toEqual([
       path.join(home, ".claude"),
