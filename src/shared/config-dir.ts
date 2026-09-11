@@ -141,12 +141,15 @@ export function tmuxSessionBase(
 
 /**
  * Every account config dir this host knows about on disk: the default
- * <home>/.claude first, then any <home>/.claude-* directory holding
- * either a settings.json or a .claude.json (evidence it's a real Claude
- * Code config dir, not an unrelated directory that happens to start with
- * ".claude-"), sorted. `CLAUDE_CONFIG_DIR` can point anywhere, so this is
- * a starting point, not the full picture - callers union it with config
- * dirs actually observed on live sessions.
+ * <home>/.claude first, then any <home>/.claude-* directory holding its
+ * own .claude.json, sorted. Claude Code writes .claude.json inside a
+ * custom CLAUDE_CONFIG_DIR but keeps the default account's copy in $HOME,
+ * so the file marks a directory an account has actually run under. A
+ * plain copy of ~/.claude (a backup, or a settings-only sync) has a
+ * settings.json but no .claude.json and is not an account.
+ * `CLAUDE_CONFIG_DIR` can point anywhere, so this is a starting point,
+ * not the full picture - callers union it with config dirs actually
+ * observed on live sessions.
  */
 export function discoverConfigDirs(home: string): string[] {
   const defaultDir = normalizeConfigDir(defaultConfigDir(home));
@@ -162,10 +165,7 @@ export function discoverConfigDirs(home: string): string[] {
     if (!name.startsWith(".claude-")) continue;
     const full = path.join(home, name);
     if (!isDirectory(full)) continue;
-    if (
-      isFile(path.join(full, "settings.json")) ||
-      isFile(path.join(full, ".claude.json"))
-    ) {
+    if (isFile(path.join(full, ".claude.json"))) {
       extra.push(normalizeConfigDir(full));
     }
   }

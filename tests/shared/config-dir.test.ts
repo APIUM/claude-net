@@ -256,9 +256,10 @@ describe("discoverConfigDirs", () => {
     expect(discoverConfigDirs(home)).toEqual([path.join(home, ".claude")]);
   });
 
-  test("finds a .claude-* sibling with a settings.json", () => {
+  test("finds a .claude-* sibling with its own .claude.json", () => {
     const personal = path.join(home, ".claude-personal");
     fs.mkdirSync(personal, { recursive: true });
+    fs.writeFileSync(path.join(personal, ".claude.json"), "{}");
     fs.writeFileSync(path.join(personal, "settings.json"), "{}");
     expect(discoverConfigDirs(home)).toEqual([
       path.join(home, ".claude"),
@@ -266,17 +267,16 @@ describe("discoverConfigDirs", () => {
     ]);
   });
 
-  test("finds a .claude-* sibling with only a .claude.json", () => {
-    const personal = path.join(home, ".claude-personal");
-    fs.mkdirSync(personal, { recursive: true });
-    fs.writeFileSync(path.join(personal, ".claude.json"), "{}");
-    expect(discoverConfigDirs(home)).toEqual([
-      path.join(home, ".claude"),
-      personal,
-    ]);
+  test("ignores a copy of the default dir that has only a settings.json", () => {
+    // `cp -r ~/.claude ~/.claude-backup` copies settings.json but not
+    // .claude.json, which the default account keeps in $HOME.
+    const backup = path.join(home, ".claude-backup");
+    fs.mkdirSync(path.join(backup, "projects"), { recursive: true });
+    fs.writeFileSync(path.join(backup, "settings.json"), "{}");
+    expect(discoverConfigDirs(home)).toEqual([path.join(home, ".claude")]);
   });
 
-  test("ignores a .claude-* directory with neither marker file", () => {
+  test("ignores a .claude-* directory with no marker file", () => {
     fs.mkdirSync(path.join(home, ".claude-scratch"), { recursive: true });
     expect(discoverConfigDirs(home)).toEqual([path.join(home, ".claude")]);
   });
@@ -290,7 +290,7 @@ describe("discoverConfigDirs", () => {
     for (const name of [".claude-zzz", ".claude-aaa"]) {
       const dir = path.join(home, name);
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, "settings.json"), "{}");
+      fs.writeFileSync(path.join(dir, ".claude.json"), "{}");
     }
     expect(discoverConfigDirs(home)).toEqual([
       path.join(home, ".claude"),
