@@ -259,8 +259,8 @@ describe("scanRecoverable", () => {
   describe("multi-account", () => {
     const personalConfigDir = () => path.join(home, ".claude-personal");
 
-    /** Seed a second account's own .claude.json + projects tree, plus the
-     *  settings.json marker `discoverConfigDirs` requires to find it. */
+    /** Seed a second account's own .claude.json (the marker
+     *  `discoverConfigDirs` requires) plus its projects tree. */
     function seedPersonal(opts: {
       name: string;
       sid: string;
