@@ -1288,6 +1288,269 @@ describe("MirrorRegistry", () => {
     expect(entry.entry.lastStatusline?.ctx_pct).toBe(75);
     expect(entry.entry.lastStatusline?.ctx_tokens).toBe(150_000);
   });
+
+  // ── keep-cache-warm state + toggle ─────────────────────────────────
+
+  test("keepWarmState returns null for an unknown sid", () => {
+    expect(reg.keepWarmState("no-such-sid")).toBeNull();
+  });
+
+  test("keepWarmState reflects a fresh session and updates with activity", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+
+    const fresh = reg.keepWarmState(sid);
+    expect(fresh).not.toBeNull();
+    if (!fresh) return;
+    expect(fresh.open).toBe(true);
+    expect(fresh.attached).toBe(false);
+    expect(fresh.awaitingUser).toBe(false);
+    expect(fresh.activity).toBe("awaiting_input");
+    expect(fresh.lastEventAt).toBe(r.entry.createdAt.getTime());
+
+    reg.recordEvent(sid, makeFrame(sid, "u-1"));
+    const busy = reg.keepWarmState(sid);
+    expect(busy).not.toBeNull();
+    if (!busy) return;
+    expect(busy.activity).toBe("busy");
+    expect(busy.lastEventAt).toBeGreaterThanOrEqual(fresh.lastEventAt);
+
+    reg.setAgentConnection(sid, { ws: { send: () => {} }, wsIdentity: {} });
+    const attached = reg.keepWarmState(sid);
+    expect(attached).not.toBeNull();
+    if (!attached) return;
+    expect(attached.attached).toBe(true);
+  });
+
+  // keepWarmState.awaitingUser walks the transcript backward rather than
+  // trusting the live entry.awaitingUser flag, so a background task's
+  // synthetic user_prompt in between doesn't hide an open permission
+  // prompt (see mirror.ts's transcriptAwaitingUser).
+
+  test("keepWarmState.awaitingUser is true for a permission notification with no assistant_message yet", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "needs your permission to use Bash",
+        },
+      }),
+    );
+    // A background task's synthetic prompt, not a real answer.
+    reg.recordEvent(sid, makeFrame(sid, "u1"));
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(true);
+  });
+
+  test("keepWarmState.awaitingUser is true for a permission notification after a tool call", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "t1", {
+        kind: "tool_call",
+        payload: {
+          kind: "tool_call",
+          tool_use_id: "tu1",
+          tool_name: "Bash",
+          input: {},
+        },
+      }),
+    );
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: { kind: "notification", text: "needs your approval" },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(true);
+  });
+
+  test("keepWarmState.awaitingUser is false once a top-level assistant_message follows", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "needs your permission to use Bash",
+        },
+      }),
+    );
+    reg.recordEvent(sid, makeFrame(sid, "u1"));
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "a1", {
+        kind: "assistant_message",
+        payload: {
+          kind: "assistant_message",
+          text: "done",
+          stop_reason: "stop",
+        },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(false);
+  });
+
+  test("keepWarmState.awaitingUser ignores a sub-agent assistant_message in between", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "n1", {
+        kind: "notification",
+        payload: {
+          kind: "notification",
+          text: "needs your permission to use Bash",
+        },
+      }),
+    );
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "a1", {
+        kind: "assistant_message",
+        agent_id: "sub-1",
+        payload: {
+          kind: "assistant_message",
+          text: "sub done",
+          stop_reason: "stop",
+          subagent: true,
+        },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.awaitingUser).toBe(true);
+  });
+
+  test("keepWarmState.lastUserPromptAt is stamped on the hub clock, not the frame's own ts", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(0);
+
+    const before = Date.now();
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        // A host clock far behind the hub's - recordEvent must not use
+        // this value, or a lagging client clock could make a real reply
+        // look older than the keep-warm module's own lastPingAt and
+        // never reset its abandoned-streak counter.
+        ts: 1,
+        payload: { kind: "user_prompt", prompt: "hello", cwd: "/a" },
+      }),
+    );
+    const after = Date.now();
+    const stamped = reg.keepWarmState(sid)?.lastUserPromptAt ?? 0;
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(after);
+  });
+
+  test("keepWarmState.lastUserPromptAt excludes the configured keep-warm ping text", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.setKeepWarmText("ping-text");
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        payload: { kind: "user_prompt", prompt: "hello", cwd: "/a" },
+      }),
+    );
+    const first = reg.keepWarmState(sid)?.lastUserPromptAt ?? 0;
+    expect(first).toBeGreaterThan(0);
+
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p2", {
+        payload: { kind: "user_prompt", prompt: "ping-text", cwd: "/a" },
+      }),
+    );
+    // The keep-warm ping's own reply turn does not advance the timestamp.
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(first);
+  });
+
+  test("keepWarmState.lastUserPromptAt ignores a sub-agent user_prompt frame", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        agent_id: "sub-1",
+        payload: { kind: "user_prompt", prompt: "hi", cwd: "/a" },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(0);
+  });
+
+  test("keepWarmState.lastUserPromptAt ignores a synthetic task-notification prompt", () => {
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+    reg.recordEvent(
+      sid,
+      makeFrame(sid, "p1", {
+        payload: {
+          kind: "user_prompt",
+          prompt:
+            "<task-notification>\n<task-id>t1</task-id>\n" +
+            "<status>completed</status>\n</task-notification>",
+          cwd: "/a",
+        },
+      }),
+    );
+    expect(reg.keepWarmState(sid)?.lastUserPromptAt).toBe(0);
+  });
+
+  test("setKeepWarm flips the flag, the summary, and broadcasts once per change", () => {
+    const events: Record<string, unknown>[] = [];
+    reg.setDashboardBroadcast((e) => events.push(e as Record<string, unknown>));
+    const r = reg.createSession("a:u@h", "/a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const sid = r.entry.sid;
+
+    reg.setKeepWarm(sid, true);
+    let summary = reg.listAll().find((s) => s.sid === sid);
+    expect(summary?.keep_warm).toBe(true);
+    let warmEvents = events.filter((e) => e.event === "mirror:keep_warm");
+    expect(warmEvents).toHaveLength(1);
+    expect(warmEvents[0]?.enabled).toBe(true);
+
+    // Idempotent: setting the same value again broadcasts nothing.
+    reg.setKeepWarm(sid, true);
+    expect(events.filter((e) => e.event === "mirror:keep_warm")).toHaveLength(
+      1,
+    );
+
+    reg.setKeepWarm(sid, false);
+    summary = reg.listAll().find((s) => s.sid === sid);
+    expect(summary).not.toHaveProperty("keep_warm");
+    warmEvents = events.filter((e) => e.event === "mirror:keep_warm");
+    expect(warmEvents).toHaveLength(2);
+    expect(warmEvents[1]?.enabled).toBe(false);
+  });
 });
 
 // Auto-start flow: simulate the mirror-agent POSTing to /api/mirror/session

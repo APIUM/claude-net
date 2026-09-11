@@ -688,6 +688,18 @@ export interface MirrorActivityEvent {
 }
 
 /**
+ * Broadcast to the dashboard socket when a session's keep-cache-warm
+ * toggle changes, so the sidebar badge and tooltip update without a
+ * reload.
+ */
+export interface MirrorKeepWarmEvent {
+  event: "mirror:keep_warm";
+  sid: string;
+  host?: string;
+  enabled: boolean;
+}
+
+/**
  * Broadcast to the dashboard socket when a session's mirror-agent binding
  * changes (source went away / came back). Lets the sidebar flip a session
  * to dimmed/offline (reconnect candidate) the moment the source dies,
@@ -966,6 +978,7 @@ export type DashboardEvent =
   | MirrorWatcherJoinedEvent
   | MirrorWatcherLeftEvent
   | MirrorActivityEvent
+  | MirrorKeepWarmEvent
   | MirrorAgentStateEvent
   | MirrorOwnerRenamedEvent
   | HostConnectedEvent
@@ -1146,4 +1159,7 @@ export interface MirrorSessionSummary {
   /** Account config dir this session belongs to. Optional so a
    *  pre-rollout mirror-agent's sessions still parse. */
   config_dir?: string;
+  /** True while the hub is pinging this session to keep its prompt cache
+   *  warm. Absent from pre-rollout hubs. */
+  keep_warm?: boolean;
 }

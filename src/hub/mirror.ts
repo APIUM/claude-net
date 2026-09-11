@@ -31,6 +31,11 @@ interface SlashCommand {
 import { Elysia } from "elysia";
 import { launchOnHost } from "./host";
 import type { HostRegistry } from "./host-registry";
+import {
+  KEEP_WARM_INTERVAL_MS,
+  type KeepWarm,
+  type KeepWarmSessionState,
+} from "./keep-warm";
 import { type MirrorStore, NullStore } from "./mirror-store";
 import { RateLimiter } from "./rate-limit";
 import type { Scheduler } from "./scheduler";
@@ -178,6 +183,20 @@ export interface MirrorSessionEntry {
     ctx_window: number;
     ts: number;
   } | null;
+  /** True while the hub is pinging this session to keep its prompt cache
+   *  warm. Mirrors `KeepWarm.isEnabled(sid)`; the module's `notify`
+   *  callback is the only writer. */
+  keepWarm: boolean;
+  /**
+   * Hub-clock timestamp of the most recent top-level user_prompt that
+   * was neither the keep-warm ping's own text nor a synthetic
+   * task-notification. Stamped on the hub rather than read from the
+   * frame's own `ts` (client clock) so a host clock lagging the hub
+   * can't make a real reply look older than it is and let the
+   * keep-warm consecutive-ping cap disable the session as abandoned.
+   * null when the session has had no such prompt.
+   */
+  lastUserPromptAt: Date | null;
 }
 
 /**
@@ -513,6 +532,45 @@ export function nextAwaitingUser(
 }
 
 /**
+ * A more conservative read of "is a permission prompt open" than the
+ * live `entry.awaitingUser` field, for callers where injecting text plus
+ * Enter into an open prompt would answer it. `entry.awaitingUser` clears
+ * on the very next event of any kind, including a background task's
+ * synthetic `<task-notification>` user_prompt - which does not mean the
+ * pane's permission prompt was answered. This instead walks the
+ * transcript backward for the last frame that actually settles the
+ * question: a top-level assistant_message means the turn resolved
+ * (false), a notification matching PERMISSION_NOTIFICATION_RE means a
+ * prompt is open (true). Anything else in between (tool calls/results,
+ * user prompts, non-matching notifications) is not conclusive and is
+ * skipped. Falls back to `entry.awaitingUser` when the transcript ring
+ * holds neither.
+ */
+function transcriptAwaitingUser(entry: MirrorSessionEntry): boolean {
+  for (let i = entry.transcript.length - 1; i >= 0; i--) {
+    const frame = entry.transcript[i];
+    if (!frame) continue;
+    const payload = frame.payload;
+    if (
+      frame.kind === "assistant_message" &&
+      !frame.agent_id &&
+      payload.kind === "assistant_message" &&
+      payload.subagent !== true
+    ) {
+      return false;
+    }
+    if (
+      frame.kind === "notification" &&
+      payload.kind === "notification" &&
+      PERMISSION_NOTIFICATION_RE.test(payload.text)
+    ) {
+      return true;
+    }
+  }
+  return entry.awaitingUser;
+}
+
+/**
  * Fold the base state and the background ledger into the state
  * dashboards render.
  */
@@ -623,6 +681,9 @@ export class MirrorRegistry {
   private boundOrphanCloseMs: number;
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
   private dashboardBroadcast: (event: DashboardEvent) => void = () => {};
+  /** Set via setKeepWarmText; "" (the default) excludes nothing, since
+   *  no real prompt is ever the empty string. */
+  private keepWarmText = "";
   /**
    * Resolves (host, ccPid) → the full name of the MCP agent that owns
    * that Claude Code process, or null. Used by createSession to apply
@@ -632,7 +693,7 @@ export class MirrorRegistry {
    */
   private agentLookup: ((host: string, ccPid: number) => string | null) | null =
     null;
-  private sessionClosedHooks: Array<(sid: string) => void> = [];
+  private sessionClosedHooks: Array<(sid: string, host?: string) => void> = [];
   readonly store: MirrorStore;
   /** Key: `${sid}:${requestId}` — awaiting MirrorPasteDoneFrame from agent. */
   private pendingPastes = new Map<string, PendingPaste>();
@@ -790,6 +851,15 @@ export class MirrorRegistry {
     this.agentLookup = fn;
   }
 
+  /** Configure the text `recordEvent` excludes from `lastUserPromptAt`
+   *  as the keep-warm ping's own turn rather than a real prompt. Pass
+   *  the live `KeepWarm` instance's resolved text (not the env-default
+   *  constant) so an overridden `text` option can't desync from what
+   *  the registry actually filters. */
+  setKeepWarmText(text: string): void {
+    this.keepWarmText = text;
+  }
+
   /**
    * Called from the MCP register handler whenever an agent (re)registers.
    * Scans all mirror sessions whose (host, ccPid) matches and rewrites
@@ -903,8 +973,11 @@ export class MirrorRegistry {
   }
 
   /** Register a callback to run when any session is closed. Used by the
-   *  uploads registry to purge per-session files. */
-  onSessionClosed(fn: (sid: string) => void): void {
+   *  uploads registry to purge per-session files and by the keep-warm
+   *  timer to stop pinging. `host` is the closed entry's host (empty
+   *  string when unknown), passed so a host-scoped listener can resolve
+   *  the same composite key the entry was stored under. */
+  onSessionClosed(fn: (sid: string, host?: string) => void): void {
     this.sessionClosedHooks.push(fn);
   }
 
@@ -1177,6 +1250,8 @@ export class MirrorRegistry {
       activityState: "awaiting_input",
       pendingBackground: new Map(),
       awaitingUser: false,
+      keepWarm: false,
+      lastUserPromptAt: null,
     };
     this.setEntry(entry);
 
@@ -1235,6 +1310,15 @@ export class MirrorRegistry {
       entry.transcript.splice(0, entry.transcript.length - this.transcriptRing);
     }
     entry.lastEventAt = new Date();
+    if (
+      frame.kind === "user_prompt" &&
+      !frame.agent_id &&
+      frame.payload.kind === "user_prompt" &&
+      frame.payload.prompt !== this.keepWarmText &&
+      parseTaskNotification(frame.payload.prompt) === null
+    ) {
+      entry.lastUserPromptAt = entry.lastEventAt;
+    }
     entry.activityState = nextActivityState(
       entry.activityState,
       frame.kind,
@@ -1438,7 +1522,7 @@ export class MirrorRegistry {
 
     for (const fn of this.sessionClosedHooks) {
       try {
-        fn(sid);
+        fn(sid, entry.host || undefined);
       } catch (err) {
         process.stderr.write(
           `[claude-net/mirror] sessionClosed hook threw for ${sid}: ${String(err)}\n`,
@@ -2249,6 +2333,52 @@ export class MirrorRegistry {
       }
     }
   }
+
+  /**
+   * Snapshot of the fields `KeepWarm` needs to decide whether a session
+   * can be pinged. Returns null when the sid is unknown. `lastUserPromptAt`
+   * is `entry.lastUserPromptAt` as recordEvent maintains it (hub-clock
+   * stamped, already excluding the keep-warm ping's own text and
+   * synthetic task-notifications).
+   */
+  keepWarmState(sid: string, host?: string): KeepWarmSessionState | null {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry) return null;
+    const now = Date.now();
+    return {
+      lastEventAt: entry.lastEventAt.getTime(),
+      activity: effectiveActivityState(
+        entry.activityState,
+        entry.pendingBackground,
+        entry.awaitingUser,
+        now,
+      ),
+      awaitingUser: transcriptAwaitingUser(entry),
+      lastUserPromptAt: entry.lastUserPromptAt
+        ? entry.lastUserPromptAt.getTime()
+        : 0,
+      open: entry.closedAt === null,
+      attached: entry.agent !== null,
+    };
+  }
+
+  /**
+   * Set the keep-cache-warm flag mirrored on the entry, broadcasting
+   * `mirror:keep_warm` when the value actually changes. `KeepWarm`'s
+   * `notify` callback is the only caller.
+   */
+  setKeepWarm(sid: string, enabled: boolean, host?: string): void {
+    const entry = this.resolveEntry(sid, host);
+    if (!entry) return;
+    if (entry.keepWarm === enabled) return;
+    entry.keepWarm = enabled;
+    this.dashboardBroadcast({
+      event: "mirror:keep_warm",
+      sid,
+      ...(entry.host ? { host: entry.host } : {}),
+      enabled,
+    });
+  }
 }
 
 function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
@@ -2273,6 +2403,7 @@ function toSummary(entry: MirrorSessionEntry): MirrorSessionSummary {
     ),
     background: prunePendingBackground(entry.pendingBackground, now),
     ...(entry.configDir ? { config_dir: entry.configDir } : {}),
+    ...(entry.keepWarm ? { keep_warm: true } : {}),
   };
 }
 
@@ -2285,10 +2416,12 @@ export interface MirrorPluginDeps {
   /** Optional — when absent the reconnect route can't relaunch dead
    *  sessions and returns 501. */
   hostRegistry?: HostRegistry;
+  /** Optional - when absent the keep-warm endpoint returns 501. */
+  keepWarm?: KeepWarm;
 }
 
 export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
-  const { mirrorRegistry, scheduler, hostRegistry } = deps;
+  const { mirrorRegistry, scheduler, hostRegistry, keepWarm } = deps;
 
   return (
     new Elysia({ prefix: "/api/mirror" })
@@ -2467,6 +2600,43 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         }
         mirrorRegistry.closeAndDrop(params.sid, "exit", found.entry.host);
         return { removed: true };
+      })
+
+      /**
+       * POST /:sid/keep-warm - toggle the per-session keep-cache-warm
+       * ping. While enabled, once the session has seen no activity for
+       * the configured interval the hub sends a tiny inject so Claude
+       * Code makes one API call and its prompt cache is refreshed
+       * before it expires. No rate limit on the toggle itself; the
+       * ping it eventually sends goes through the same relay as
+       * /inject, which is where the limits apply.
+       */
+      .post("/:sid/keep-warm", ({ params, body, query, set }) => {
+        if (!keepWarm) {
+          set.status = 501;
+          return { error: "Keep-warm is not enabled on this hub." };
+        }
+        const host = (query as Record<string, string | undefined>).host;
+        const found = mirrorRegistry.getSession(params.sid, host);
+        if (!found.ok) {
+          set.status = found.status;
+          return { error: found.error };
+        }
+        const payload = (body ?? {}) as { enabled?: unknown };
+        if (typeof payload.enabled !== "boolean") {
+          set.status = 400;
+          return { error: "enabled must be a boolean." };
+        }
+        if (payload.enabled) {
+          const result = keepWarm.enable(found.entry.sid, found.entry.host);
+          if (!result.ok) {
+            set.status = result.status;
+            return { error: result.error };
+          }
+          return { enabled: true, interval_ms: keepWarm.intervalMs };
+        }
+        keepWarm.disable(found.entry.sid, found.entry.host);
+        return { enabled: false, interval_ms: keepWarm.intervalMs };
       })
 
       /**
@@ -2817,6 +2987,7 @@ export function mirrorPlugin(deps: MirrorPluginDeps): Elysia {
         inject_max_kb: Math.floor(MAX_INJECT_BYTES / 1024),
         paste_max_mb: Math.floor(MAX_PASTE_BYTES / (1024 * 1024)),
         inject_rpm: INJECT_RPM,
+        keep_warm_interval_ms: keepWarm?.intervalMs ?? KEEP_WARM_INTERVAL_MS,
       }))
 
       /**

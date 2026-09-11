@@ -1703,6 +1703,8 @@
   .cn-session-row.is-dead .cn-session-title,
   .cn-session-row.is-dead .cn-session-cwd { color: var(--text-muted); }
   .cn-session-dead { color: var(--text-muted); }
+  .cn-session-warm { font-size: 11px; line-height: 1; cursor: default; }
+  .cn-session-row.is-dead .cn-session-warm { color: var(--text-muted); }
 
   /* Transient toast for context-menu action feedback (reconnect result). */
   .cn-toast {
@@ -3344,6 +3346,18 @@
     });
     return match;
   }
+  // Idle threshold before the hub pings a keep-warm session, used for
+  // the sidebar badge's "next ping in" tooltip. The literal is only the
+  // fallback until the one-time fetch below resolves.
+  var keepWarmIntervalMs = 50 * 60 * 1000;
+  fetch('/api/mirror/config')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(cfg) {
+      if (cfg && typeof cfg.keep_warm_interval_ms === 'number' && cfg.keep_warm_interval_ms > 0) {
+        keepWarmIntervalMs = cfg.keep_warm_interval_ms;
+      }
+    })
+    .catch(function() { /* keep the fallback */ });
   const hosts = new Map(); // host_id -> { user, hostname, home, recent_cwds, allow_dangerous_skip, online, connected_at, config_dirs }
   const recoverableCounts = new Map(); // host_id -> number of crashed sessions in the default window
   const recoverableCountsByAccount = new Map(); // "host_id configDir" -> number of crashed sessions in that account
@@ -3628,6 +3642,15 @@
           entry.last_event_at = new Date(event.ts || Date.now()).toISOString();
           if (event.activity_state) entry.activity_state = event.activity_state;
           if (event.background) entry.background = event.background;
+          renderAgentsDebounced();
+        }
+        break;
+      }
+
+      case 'mirror:keep_warm': {
+        var kw = findMirrorEntry(event.sid, event.host);
+        if (kw) {
+          kw.keep_warm = !!event.enabled;
           renderAgentsDebounced();
         }
         break;
@@ -4002,6 +4025,8 @@
       + ' data-sid="' + escapeAttr(sess.sid) + '"'
       + ' data-host="' + escapeAttr(sess.host || '') + '"'
       + ' data-dead="' + (dead ? '1' : '0') + '"'
+      + ' data-closed="' + (sess.closed_at ? '1' : '0') + '"'
+      + ' data-keepwarm="' + (sess.keep_warm ? '1' : '0') + '"'
       + ' data-name="' + escapeAttr(sess.owner_agent) + '">'
       + '<span class="' + dotCls + '"' + (dotTitle ? ' title="' + escapeAttr(dotTitle) + '"' : '') + '></span>'
       + '<div class="cn-session-body">'
@@ -4009,11 +4034,25 @@
       +   '<div class="cn-session-sub">'
       +     '<span class="cn-session-cwd">' + escapeHtml(cwdShort) + '</span>'
       +     (age ? ' <span class="cn-session-age">· ' + escapeHtml(age) + '</span>' : '')
+      // Shown for a detached-but-not-closed row too, so there is still a
+      // way to turn the ping off before the session reconnects.
+      +     (sess.keep_warm && !sess.closed_at ? ' <span class="cn-session-warm" title="' + escapeAttr(keepWarmTitle(sess)) + '">☕</span>' : '')
       +     (dead ? ' <span class="cn-session-dead">· offline</span>' : '')
       +   '</div>'
       + '</div>'
       + '</a>'
     );
+  }
+
+  // Tooltip for the keep-warm badge: how long until the hub's next idle
+  // check would fire a ping, derived from last_event_at the same way
+  // the hub itself measures idle time.
+  function keepWarmTitle(sess) {
+    var last = Date.parse(sess.last_event_at || '');
+    if (!isFinite(last)) return 'Keeping cache warm';
+    var due = last + keepWarmIntervalMs - Date.now();
+    if (due <= 0) return 'Keeping cache warm · ping due now';
+    return 'Keeping cache warm · next ping in about ' + formatElapsed(Math.round(due / 1000));
   }
 
   // Bucket a duration given in seconds into the short form shared by
@@ -4361,6 +4400,27 @@
       cnToast('Reconnect failed: ' + (err && err.message ? err.message : 'network error'), 'err');
     });
   }
+  function setKeepWarm(sid, host, label, enabled) {
+    var q = host ? '?host=' + encodeURIComponent(host) : '';
+    fetch('/api/mirror/' + encodeURIComponent(sid) + '/keep-warm' + q, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled })
+    }).then(function(r) {
+      return r.json().then(function(body) { return { status: r.status, body: body }; });
+    }).then(function(res) {
+      if (res.status === 200) {
+        var mins = Math.round((res.body.interval_ms || keepWarmIntervalMs) / 60000);
+        cnToast(enabled
+          ? 'Keeping ' + label + ' warm: ping after ' + mins + 'm idle'
+          : 'Stopped keeping ' + label + ' warm', 'ok');
+      } else {
+        cnToast('Keep warm failed: ' + ((res.body && res.body.error) || ('HTTP ' + res.status)), 'err');
+      }
+    }).catch(function(err) {
+      cnToast('Keep warm failed: ' + (err && err.message ? err.message : 'network error'), 'err');
+    });
+  }
   function terminateSession(sid, host, label) {
     var q = host ? '?host=' + encodeURIComponent(host) : '';
     cnToast('Closing ' + (label || sid) + '…', '');
@@ -4463,6 +4523,8 @@
     var sid = row.getAttribute('data-sid') || '';
     var host = row.getAttribute('data-host') || '';
     var dead = row.getAttribute('data-dead') === '1';
+    var closed = row.getAttribute('data-closed') === '1';
+    var warm = row.getAttribute('data-keepwarm') === '1';
     var cwd = row.getAttribute('data-cwd') || '';
     var hostId = row.getAttribute('data-hostid') || '';
     var name = row.getAttribute('data-name') || sid || '';
@@ -4487,6 +4549,15 @@
         closeCtxMenu();
         reconnectSession(sid, host, label);
       });
+      // Offered for a detached-but-not-closed row too (dead && !closed):
+      // otherwise a session that keeps pinging on reattach has no way
+      // to be switched off until it reconnects.
+      if (!closed) {
+        addCtxItem(cnCtxMenu, warm ? '☕ Stop keeping warm' : '☕ Keep cache warm', function() {
+          closeCtxMenu();
+          setKeepWarm(sid, host, label, !warm);
+        });
+      }
       if (dead) {
         // Gravestone: the process is already gone, just drop the row
         // instead of waiting out the retention window.
