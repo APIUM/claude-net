@@ -765,6 +765,51 @@ export interface HostLaunchDoneFrame {
   error?: string;
 }
 
+/** Metadata from `omp collab list --json`. It deliberately excludes a link. */
+export interface HostCollabSession {
+  instanceId: string;
+  generation: number;
+  access: "view" | "control";
+  pid: number;
+  sessionId: string;
+  sessionName: string | null;
+  cwd: string;
+  model: { provider: string; id: string } | null;
+  startedAt: number;
+  participants: number;
+  relayConnected: boolean;
+  inputRequired: boolean;
+}
+
+export interface HostCollabListRequest {
+  action: "host_collab_list";
+  request_id: string;
+}
+
+export interface HostCollabListDoneFrame {
+  action: "host_collab_list_done";
+  request_id: string;
+  sessions?: HostCollabSession[];
+  error?: string;
+}
+
+export interface HostCollabLinkRequest {
+  action: "host_collab_link";
+  request_id: string;
+  instance_id: string;
+  generation: number;
+  access: "view" | "control";
+}
+
+/** The URL is an in-memory broker result. It must not enter the event log. */
+export interface HostCollabLinkDoneFrame {
+  action: "host_collab_link_done";
+  request_id: string;
+  access?: "view" | "control";
+  url?: string;
+  error?: string;
+}
+
 /**
  * A Claude Code session that exited without a graceful shutdown and can
  * be resumed. Built by the daemon from its own read of ~/.claude.json and

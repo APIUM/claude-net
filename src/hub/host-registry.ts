@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import type {
   DashboardEvent,
+  HostCollabLinkDoneFrame,
+  HostCollabListDoneFrame,
   HostLaunchDoneFrame,
   HostLsDoneFrame,
   HostMkdirDoneFrame,
@@ -14,6 +16,8 @@ export type HostRpcResponse =
   | HostLsDoneFrame
   | HostMkdirDoneFrame
   | HostLaunchDoneFrame
+  | HostCollabListDoneFrame
+  | HostCollabLinkDoneFrame
   | HostRecoverableDoneFrame
   | HostRestoreDoneFrame;
 
@@ -21,6 +25,8 @@ export type HostRpcAction =
   | "host_ls"
   | "host_mkdir"
   | "host_launch"
+  | "host_collab_list"
+  | "host_collab_link"
   | "host_recoverable"
   | "host_restore";
 

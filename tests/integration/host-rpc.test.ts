@@ -281,6 +281,70 @@ describe("host RPC e2e", () => {
     daemon.close();
   });
 
+  test("GET /api/host/:id/collab returns host-local Collab metadata without a link", async () => {
+    const daemon = await connectMockDaemon(hub.port, {
+      hostId: "alice@a",
+      onRpc: (frame) => {
+        expect(frame.action).toBe("host_collab_list");
+        return {
+          action: "host_collab_list_done",
+          request_id: frame.request_id,
+          sessions: [
+            { instanceId: "abc123", generation: 4, access: "control" },
+          ],
+        };
+      },
+    });
+    await waitForHost(hub.hostRegistry, "alice@a");
+
+    const resp = await fetch(
+      `http://localhost:${hub.port}/api/host/alice@a/collab`,
+    );
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as {
+      sessions: Array<Record<string, unknown>>;
+    };
+    expect(body.sessions).toEqual([
+      { instanceId: "abc123", generation: 4, access: "control" },
+    ]);
+    expect(JSON.stringify(body)).not.toContain("url");
+    daemon.close();
+  });
+
+  test("POST /api/host/:id/collab/:instanceId/link preserves the selected generation and access", async () => {
+    const daemon = await connectMockDaemon(hub.port, {
+      hostId: "alice@a",
+      onRpc: (frame) => {
+        expect(frame.action).toBe("host_collab_link");
+        expect(frame.instance_id).toBe("abc123");
+        expect(frame.generation).toBe(4);
+        expect(frame.access).toBe("view");
+        return {
+          action: "host_collab_link_done",
+          request_id: frame.request_id,
+          access: "view",
+          url: "https://web.example/#room.key",
+        };
+      },
+    });
+    await waitForHost(hub.hostRegistry, "alice@a");
+
+    const resp = await fetch(
+      `http://localhost:${hub.port}/api/host/alice@a/collab/abc123/link`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ generation: 4, access: "view" }),
+      },
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({
+      access: "view",
+      url: "https://web.example/#room.key",
+    });
+    daemon.close();
+  });
+
   test("RPC to an unknown host returns 404", async () => {
     const resp = await fetch(
       `http://localhost:${hub.port}/api/host/ghost@nowhere/ls?path=/tmp`,
