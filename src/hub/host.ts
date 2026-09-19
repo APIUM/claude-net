@@ -25,7 +25,6 @@ const LS_TIMEOUT_MS = 5_000;
 const MKDIR_TIMEOUT_MS = 5_000;
 const LAUNCH_TIMEOUT_MS = 10_000;
 const RECOVERABLE_TIMEOUT_MS = 15_000;
-const COLLAB_TIMEOUT_MS = 5_000;
 // The daemon replies once every tmux session has been spawned, staggering
 // spawns ~400ms apart and never blocking on trust-prompt detection. The
 // ceiling is a fixed floor for RPC dispatch overhead plus a per-session
@@ -41,7 +40,6 @@ const MAX_RESTORE_BATCH = 20;
  *  First char must be alphanumeric so the value can't become a CLI flag
  *  (e.g. `-x`) when passed as `--resume <sid>`. */
 const SID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const COLLAB_INSTANCE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 const launchBurstLimiter = new RateLimiter({ max: 1, windowMs: 5_000 });
 const launchHourLimiter = new RateLimiter({ max: 10, windowMs: 60 * 60_000 });
@@ -141,7 +139,6 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
   const lsLimiter = new RateLimiter({ max: 20, windowMs: 1_000 });
   const mkdirLimiter = new RateLimiter({ max: 5, windowMs: 60_000 });
   const recoverableLimiter = new RateLimiter({ max: 10, windowMs: 10_000 });
-  const collabLimiter = new RateLimiter({ max: 20, windowMs: 10_000 });
   const restoreLimiter = new RateLimiter({ max: 3, windowMs: 5 * 60_000 });
 
   return new Elysia({ prefix: "/api/host" })
@@ -289,94 +286,6 @@ export function hostPlugin(deps: HostPluginDeps): Elysia {
           return { error: resp.error };
         }
         return { sessions: resp.sessions ?? [] };
-      } catch (err) {
-        set.status = 504;
-        return { error: (err as Error).message };
-      }
-    })
-
-    .get("/:id/collab", async ({ params, set }) => {
-      const hostId = params.id;
-      if (!hostRegistry.get(hostId)) {
-        set.status = 404;
-        return { error: `host '${hostId}' not connected` };
-      }
-      if (!collabLimiter.allow(hostId)) {
-        set.status = 429;
-        set.headers["retry-after"] = "1";
-        return { error: "Rate limit: collab (20 per 10s)" };
-      }
-      try {
-        const resp = await hostRegistry.sendRpc(
-          hostId,
-          "host_collab_list",
-          {},
-          COLLAB_TIMEOUT_MS,
-        );
-        if (resp.action !== "host_collab_list_done") {
-          set.status = 502;
-          return { error: "Unexpected RPC response" };
-        }
-        if (resp.error) {
-          set.status = 400;
-          return { error: resp.error };
-        }
-        return { sessions: resp.sessions ?? [] };
-      } catch (err) {
-        set.status = 504;
-        return { error: (err as Error).message };
-      }
-    })
-
-    .post("/:id/collab/:instanceId/link", async ({ params, body, set }) => {
-      const hostId = params.id;
-      const instanceId = params.instanceId;
-      const payload = body as { generation?: unknown; access?: unknown };
-      if (!COLLAB_INSTANCE_ID_RE.test(instanceId)) {
-        set.status = 400;
-        return { error: "Invalid Collab instance ID" };
-      }
-      if (
-        typeof payload.generation !== "number" ||
-        !Number.isSafeInteger(payload.generation) ||
-        payload.generation < 0
-      ) {
-        set.status = 400;
-        return { error: "generation must be a non-negative integer" };
-      }
-      if (payload.access !== "view" && payload.access !== "control") {
-        set.status = 400;
-        return { error: "access must be view or control" };
-      }
-      if (!hostRegistry.get(hostId)) {
-        set.status = 404;
-        return { error: `host '${hostId}' not connected` };
-      }
-      if (!collabLimiter.allow(hostId)) {
-        set.status = 429;
-        set.headers["retry-after"] = "1";
-        return { error: "Rate limit: collab (20 per 10s)" };
-      }
-      try {
-        const resp = await hostRegistry.sendRpc(
-          hostId,
-          "host_collab_link",
-          {
-            instance_id: instanceId,
-            generation: payload.generation,
-            access: payload.access,
-          },
-          COLLAB_TIMEOUT_MS,
-        );
-        if (resp.action !== "host_collab_link_done") {
-          set.status = 502;
-          return { error: "Unexpected RPC response" };
-        }
-        if (resp.error || !resp.url || !resp.access) {
-          set.status = 400;
-          return { error: resp.error ?? "Host did not return a Collab link" };
-        }
-        return { access: resp.access, url: resp.url };
       } catch (err) {
         set.status = 504;
         return { error: (err as Error).message };

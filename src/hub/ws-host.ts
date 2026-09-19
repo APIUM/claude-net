@@ -158,8 +158,6 @@ export function wsHostPlugin(
         frame.action === "host_ls_done" ||
         frame.action === "host_mkdir_done" ||
         frame.action === "host_launch_done" ||
-        frame.action === "host_collab_list_done" ||
-        frame.action === "host_collab_link_done" ||
         frame.action === "host_recoverable_done" ||
         frame.action === "host_restore_done"
       ) {
