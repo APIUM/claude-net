@@ -265,66 +265,94 @@ class SessionChannelListPatch:
 
 
 class DynamicWorkflowsMasterGatePatch:
-    """Force the Workflow master gate to report "enabled".
+    """Force the Workflow master gate to report "enabled", across the two
+    gate shapes seen in the field.
 
-    The gate resolver (`Bfr()` in 2.1.280) returns a disabled-reason
-    string — `"managed_settings"`, `"org_policy"`, `"unavailable"`,
-    `"user_setting"` — or `void 0` when workflows are enabled. The
-    Workflow tool's `validateInput` treats a non-`void 0` return as
-    disabled (`let a=Bfr();if(a!==void 0){...feature_disabled...}`), and
-    the boolean wrapper `zd()` — the tool's `isEnabled`, prompt-text
-    inclusion, tool-list assembly, and effort gates all resolve through
-    it — is `return Bfr()===void 0`. So the enabling value is `void 0`,
-    not `true`: the polarity is inverted from the older boolean gate,
-    and a `return!0` rewrite would mark workflows permanently disabled.
+    2.1.280+ reason-string gate (`Bfr`): the resolver returns a
+    disabled-reason string — `"managed_settings"`, `"org_policy"`,
+    `"unavailable"`, `"user_setting"` — or `void 0` when workflows are
+    enabled. The Workflow tool's `validateInput` treats a non-`void 0`
+    return as disabled (`let a=Bfr();if(a!==void 0){...feature_disabled
+    ...}`), and the boolean wrapper `zd()` — the tool's `isEnabled`,
+    prompt-text inclusion, tool-list assembly, and effort gates all
+    resolve through it — is `return Bfr()===void 0`. So the enabling
+    value is `void 0`, not `true`: the polarity is inverted from the
+    boolean gate, and a `return!0` rewrite would mark workflows
+    permanently disabled. The whole body is rewritten to `return void 0`
+    + padding, anchored on the body's first statement (the managed
+    `disableWorkflows` / `userSettings` check).
 
-    We rewrite the whole body to `return void 0` + padding. Anchored on
-    the body's first statement (the managed `disableWorkflows` /
-    `userSettings` check), which is unique in the bundle, rather than on
-    the minified function name. Same-length; the closing `}` lies
-    outside the rewritten span.
+    <=2.1.263 boolean gate (`Y2`): short-circuits to `!1` on the first
+    failed check and returns `<launch-gate>()??<defaultOn>`. The whole
+    matched body is flipped to `return!0` + padding.
+
+    Exactly one shape is present in a given build; whichever matches is
+    patched (the reason-string shape takes precedence). Both anchor on
+    structure, not the minified function name (`Y2`, then `Bfr`).
     """
 
     name = "Dynamic workflows master gate (Y2)"
     description = (
-        "Force the Workflow master gate to report enabled by rewriting "
-        "the disabled-reason resolver to return void 0."
+        "Force the Workflow master gate to report enabled: rewrite the "
+        "2.1.280+ disabled-reason resolver to return void 0, or flip the "
+        "older boolean gate to return true."
     )
     may_grow = False
-    expect_count = 1
-    diag_anchor = b'"disableWorkflows",!1).source==="userSettings"'
-    ANCHOR_RX = re.compile(
+    expect_count = (1, None)
+    diag_anchor = b"defaultOn"
+    # 2.1.280+ reason-string resolver: anchor on the unique first
+    # statement, rewrite the whole body to `return void 0`.
+    BFR_RX = re.compile(
         rb'function [\w$]{1,8}\(\)\{(?='
         rb'let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+&&!'
         rb'[\w$]+\.CLAUDE_CODE_DISABLE_WORKFLOWS&&'
         rb'[\w$]+\("disableWorkflows",!1\)\.source==="userSettings";)'
     )
-    NEW_BODY = b"return void 0"
+    BFR_BODY = b"return void 0"
+    # <=2.1.263 boolean gate: flip the whole body to `return!0`.
+    BOOL_RX = re.compile(
+        rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;'
+        rb'let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+(?:\.[\w$]+)*\(\);'
+        rb'if\(![\w$]+\)return!1;'
+        rb'return [\w$]+\(\)(?:\?\.[\w$]+(?:\.[\w$]+)*)?\?\?[\w$]+'
+    )
+    BOOL_BODY = b"return!0"
 
     def discover(self, ctx: DiscoveryContext) -> list[Edit]:
-        matches = ctx.find_regex_in_payload(self.ANCHOR_RX.pattern)
-        if len(matches) != 1:
-            return []
-        m = matches[0]
-        body_start = m.end()
-        body_end = ctx.find_balanced_close(
-            body_start, ctx.bun.offsets_struct_offset,
-        )
-        if body_end is None:
-            return []
-        body_len = body_end - body_start
-        if body_len < len(self.NEW_BODY):
-            return []
-        old = bytes(ctx.buf[body_start:body_end])
-        new = self.NEW_BODY + b" " * (body_len - len(self.NEW_BODY))
-        return [Edit(
-            offset=body_start, old=old, new=new,
-            patch_name=self.name,
-        )]
+        end = ctx.bun.offsets_struct_offset
+        bfr = ctx.find_regex_in_payload(self.BFR_RX.pattern)
+        if bfr:
+            edits: list[Edit] = []
+            for m in bfr:
+                body_start = m.end()
+                body_end = ctx.find_balanced_close(body_start, end)
+                if body_end is None:
+                    continue
+                body_len = body_end - body_start
+                if body_len < len(self.BFR_BODY):
+                    continue
+                old = bytes(ctx.buf[body_start:body_end])
+                new = self.BFR_BODY + b" " * (body_len - len(self.BFR_BODY))
+                edits.append(Edit(
+                    offset=body_start, old=old, new=new,
+                    patch_name=self.name,
+                ))
+            return edits
+        edits = []
+        for m in ctx.find_regex_in_payload(self.BOOL_RX.pattern):
+            old = m.group(0)
+            new = self.BOOL_BODY + b" " * (len(old) - len(self.BOOL_BODY))
+            edits.append(Edit(
+                offset=m.start(), old=old, new=new,
+                patch_name=self.name,
+            ))
+        return edits
 
     def cache_key(self) -> str:
         return (
             f"DynamicWorkflowsMasterGatePatch:"
-            f"{self.ANCHOR_RX.pattern.decode('latin1')}:"
-            f"{self.NEW_BODY.decode('latin1')}"
+            f"{self.BFR_RX.pattern.decode('latin1')}:"
+            f"{self.BFR_BODY.decode('latin1')}:"
+            f"{self.BOOL_RX.pattern.decode('latin1')}:"
+            f"{self.BOOL_BODY.decode('latin1')}"
         )

@@ -241,6 +241,12 @@ rb'function [\w$]{1,8}\(\)\{(?=let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+&&![\w$]+\.CLA
 
 **Replacement:** rewrite the whole body to `return void 0` + space padding (the closing `}` is outside the rewritten span). Same length; the resolver unconditionally reports "enabled".
 
+**Older builds (≤ 2.1.263)** carry the earlier *boolean* gate instead — it short-circuits to `!1` on the first failed check and returns `<launch-gate>()??<defaultOn>`:
+```python
+rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+(?:\.[\w$]+)*\(\);if\(![\w$]+\)return!1;return [\w$]+\(\)(?:\?\.[\w$]+(?:\.[\w$]+)*)?\?\?[\w$]+'
+```
+There the whole matched body is flipped to `return!0` + padding. The patch tries the reason-string shape first and falls back to the boolean shape, so one definition covers the version range in the field.
+
 **Expected matches:** 1
 
 ## The launcher script
