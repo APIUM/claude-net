@@ -265,33 +265,66 @@ class SessionChannelListPatch:
 
 
 class DynamicWorkflowsMasterGatePatch:
+    """Force the Workflow master gate to report "enabled".
+
+    The gate resolver (`Bfr()` in 2.1.280) returns a disabled-reason
+    string — `"managed_settings"`, `"org_policy"`, `"unavailable"`,
+    `"user_setting"` — or `void 0` when workflows are enabled. The
+    Workflow tool's `validateInput` treats a non-`void 0` return as
+    disabled (`let a=Bfr();if(a!==void 0){...feature_disabled...}`), and
+    the boolean wrapper `zd()` — the tool's `isEnabled`, prompt-text
+    inclusion, tool-list assembly, and effort gates all resolve through
+    it — is `return Bfr()===void 0`. So the enabling value is `void 0`,
+    not `true`: the polarity is inverted from the older boolean gate,
+    and a `return!0` rewrite would mark workflows permanently disabled.
+
+    We rewrite the whole body to `return void 0` + padding. Anchored on
+    the body's first statement (the managed `disableWorkflows` /
+    `userSettings` check), which is unique in the bundle, rather than on
+    the minified function name. Same-length; the closing `}` lies
+    outside the rewritten span.
+    """
+
     name = "Dynamic workflows master gate (Y2)"
     description = (
-        "Force the four-gate Workflow master to return true unconditionally."
+        "Force the Workflow master gate to report enabled by rewriting "
+        "the disabled-reason resolver to return void 0."
     )
     may_grow = False
-    expect_count = (1, None)
-    diag_anchor = b"available:"
-    PATTERN = (
-        rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;'
-        rb'let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+(?:\.[\w$]+)*\(\);'
-        rb'if\(![\w$]+\)return!1;return [\w$]+\(\)(?:\?\.[\w$]+(?:\.[\w$]+)*)?\?\?[\w$]+'
+    expect_count = 1
+    diag_anchor = b'"disableWorkflows",!1).source==="userSettings"'
+    ANCHOR_RX = re.compile(
+        rb'function [\w$]{1,8}\(\)\{(?='
+        rb'let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+&&!'
+        rb'[\w$]+\.CLAUDE_CODE_DISABLE_WORKFLOWS&&'
+        rb'[\w$]+\("disableWorkflows",!1\)\.source==="userSettings";)'
     )
-    NEW_BODY = b"return!0"
+    NEW_BODY = b"return void 0"
 
     def discover(self, ctx: DiscoveryContext) -> list[Edit]:
-        edits: list[Edit] = []
-        for m in ctx.find_regex_in_payload(self.PATTERN):
-            old = m.group(0)
-            new = self.NEW_BODY + b" " * (len(old) - len(self.NEW_BODY))
-            edits.append(Edit(
-                offset=m.start(), old=old, new=new,
-                patch_name=self.name,
-            ))
-        return edits
+        matches = ctx.find_regex_in_payload(self.ANCHOR_RX.pattern)
+        if len(matches) != 1:
+            return []
+        m = matches[0]
+        body_start = m.end()
+        body_end = ctx.find_balanced_close(
+            body_start, ctx.bun.offsets_struct_offset,
+        )
+        if body_end is None:
+            return []
+        body_len = body_end - body_start
+        if body_len < len(self.NEW_BODY):
+            return []
+        old = bytes(ctx.buf[body_start:body_end])
+        new = self.NEW_BODY + b" " * (body_len - len(self.NEW_BODY))
+        return [Edit(
+            offset=body_start, old=old, new=new,
+            patch_name=self.name,
+        )]
 
     def cache_key(self) -> str:
         return (
-            f"DynamicWorkflowsMasterGatePatch:{self.PATTERN.decode('latin1')}:"
+            f"DynamicWorkflowsMasterGatePatch:"
+            f"{self.ANCHOR_RX.pattern.decode('latin1')}:"
             f"{self.NEW_BODY.decode('latin1')}"
         )

@@ -211,39 +211,37 @@ rb'if\(![a-zA-Z0-9_$]+\.dev\)[a-zA-Z0-9_$]+\.push\(\{entry:[a-zA-Z0-9_$]+,why:"s
 
 ### Patch 7: Dynamic workflows master gate
 
-**What it bypasses:** The `Workflow` tool (multi-agent orchestration via `Workflow(...)` invocations) is gated behind four independent checks. When any of them fails the tool returns `Dynamic workflows are not enabled for this session (org policy, launch gate, or the "Dynamic workflows" setting in /config)`.
+**What it bypasses:** The `Workflow` tool (multi-agent orchestration via `Workflow(...)` invocations) is gated behind a workflows-enabled check. When it fails the tool returns `Dynamic workflows are not enabled for this session (org policy, launch gate, or the "Dynamic workflows" setting in /config)`.
 
-The gates, in order:
+The gate resolver (`Bfr()` in 2.1.280) folds four checks and returns a *disabled-reason string*, or `void 0` when workflows are enabled:
 
-1. Managed-settings `disableWorkflows` policy (admin kill switch)
-2. Org policy `allow_workflows` capability (Statsig org-level entitlement)
-3. Statsig launch gate `tengu_workflows_enabled` (per-account rollout)
-4. User setting `enableWorkflows` from `/config` (defaults to plan-based)
-
-All four are collapsed into a single `Y2()` helper that short-circuits on the first miss:
+1. Managed-settings `disableWorkflows` policy (admin kill switch) → `"managed_settings"`
+2. Org policy `allow_workflows` capability (Statsig org-level entitlement) → `"org_policy"`
+3. Statsig launch gate `tengu_workflows_enabled` (per-account rollout) → `"unavailable"`
+4. User setting `enableWorkflows` from `/config` (defaults to plan-based) → `"user_setting"` / `"managed_settings"`
 
 ```javascript
-function Y2(){
-  if(B48())return!1;                          // managed disable
-  if(!a87())return!1;                         // org policy
-  let{available:H,defaultOn:$}=BP6();
-  if(!H)return!1;                             // launch gate
-  return fP5()??$;                            // /config setting
+function Bfr(){
+  let e=SXt(),o=e&&!a.CLAUDE_CODE_DISABLE_WORKFLOWS&&yo("disableWorkflows",!1).source==="userSettings";
+  if(e&&!o)return"managed_settings";
+  if(!vXt())return"org_policy";
+  let{available:t,defaultOn:r}=i();
+  if(!t)return"unavailable";
+  if(!(gT()?.settings.enableWorkflows??r)){...}   // "user_setting" | "managed_settings"
+  return o?"user_setting":void 0                   // void 0 => enabled
 }
 ```
 
-The Workflow tool's `validateInput`, `isEnabled`, prompt-text inclusion, keyboard handler, history loader, and tool-list assembly all call `Y2()` directly, so a single body rewrite gates them all.
+The Workflow tool's `validateInput` reads `Bfr()` directly (`let a=Bfr();if(a!==void 0){...feature_disabled...}`), and the boolean wrapper `function zd(){return Bfr()===void 0}` backs the tool's `isEnabled`, prompt-text inclusion, tool-list assembly, and effort gates. So the enabling value is `void 0`, **not** `true`: the polarity is inverted from the older boolean gate, and a `return!0` rewrite would mark workflows permanently *disabled*.
 
-**Regex to find it:**
+**Regex to find it:** anchor on the body's first statement (unique in the bundle), not the minified function name — which mangles per build (`Y2`, then `Bfr`):
 ```python
-rb'if\([\w$]+\(\)\)return!1;if\(![\w$]+\(\)\)return!1;let\{available:[\w$]+,defaultOn:[\w$]+\}=[\w$]+\(\);if\(![\w$]+\)return!1;return [\w$]+\(\)\?\?[\w$]+'
+rb'function [\w$]{1,8}\(\)\{(?=let [\w$]+=[\w$]+\(\),[\w$]+=[\w$]+&&![\w$]+\.CLAUDE_CODE_DISABLE_WORKFLOWS&&[\w$]+\("disableWorkflows",!1\)\.source==="userSettings";)'
 ```
 
-The function and helper names (Y2, B48, a87, BP6, fP5) all mangle per build. The destructuring `{available:X,defaultOn:X}` is unique to this function in the entire bundle, so it serves as the structural anchor.
+**Replacement:** rewrite the whole body to `return void 0` + space padding (the closing `}` is outside the rewritten span). Same length; the resolver unconditionally reports "enabled".
 
-**Replacement:** `return!0` + spaces (closing `}` is outside the match). Same length, function unconditionally returns `true`.
-
-**Expected matches:** 1 (single payload copy in observed builds; the second copy seen for older channel patches isn't always present)
+**Expected matches:** 1
 
 ## The launcher script
 
@@ -296,7 +294,7 @@ grep -cP 'if\(!1\s+\)return\{action:"skip"' /tmp/test-patched  # Patch 3
 grep -cP '\?\?\{kind:"server",name:e,dev:!0\}' /tmp/test-patched  # Patch 4
 grep -cP '\|\| [a-zA-Z0-9_$]+\(\)\?\.accessToken' /tmp/test-patched  # Patch 5
 grep -cP 'if\(!1\s+\)[a-zA-Z0-9_$]+\.push' /tmp/test-patched  # Patch 6
-grep -cP 'function [\w$]+\(\)\{return!0 +\}function [\w$]+\(\)\{return [\w$]+\(\)\.defaultOn\}' /tmp/test-patched  # Patch 7
+grep -cP 'function [\w$]+\(\)\{return void 0 +\}' /tmp/test-patched  # Patch 7 (returns 1)
 ```
 
 End-to-end check that channels actually register without the CLI flag — the thing Patch 4 exists for:
