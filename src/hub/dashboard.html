@@ -3929,7 +3929,17 @@
       }
     }
 
+    // Replacing the rows empties the list for a moment, which clamps the
+    // sidebar's scroll position to the top. Put it back so a repaint
+    // triggered by activity elsewhere does not move what the user is
+    // looking at.
+    var listScroller = agentListEl;
+    while (listScroller && listScroller.scrollHeight <= listScroller.clientHeight) {
+      listScroller = listScroller.parentElement;
+    }
+    var listScrollTop = listScroller ? listScroller.scrollTop : 0;
     agentListEl.innerHTML = html;
+    if (listScroller && listScrollTop > 0) listScroller.scrollTop = listScrollTop;
   }
 
   // `showControls` is false when this host has more than one account:
@@ -5692,9 +5702,26 @@
       return anchor;
     }
 
+    // scrollTop as of the previous scroll event, so the handler can tell
+    // an upward move from content growth or a programmatic tail snap.
+    // Reset to 0 wherever the transcript is wiped, since the wipe clamps
+    // scrollTop to 0 and that clamp must not read as the user scrolling.
+    var lastScrollTop = 0;
     transcriptEl.addEventListener('scroll', function() {
-      var distance = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
-      setScrolledUp(distance > SCROLL_LOCK_THRESHOLD);
+      var top = transcriptEl.scrollTop;
+      var distance = transcriptEl.scrollHeight - top - transcriptEl.clientHeight;
+      var movedUp = top < lastScrollTop - 0.5;
+      lastScrollTop = top;
+      // Following stops on any upward move away from the tail, however
+      // small. A distance threshold alone is not enough: while the user
+      // is still inside the first SCROLL_LOCK_THRESHOLD pixels of a
+      // scroll-up, an event arriving on a busy session would snap them
+      // back to the tail, and a gradual wheel or trackpad scroll never
+      // gets past that zone. Scrolling back down into the tail zone
+      // resumes following.
+      if (distance <= 1) setScrolledUp(false);
+      else if (movedUp) setScrolledUp(true);
+      else if (distance <= SCROLL_LOCK_THRESHOLD) setScrolledUp(false);
       var state = { scrolledUp: userScrolledUp };
       if (userScrolledUp) {
         // Only capture anchor when scrolled-up; at-bottom state needs
@@ -5704,6 +5731,19 @@
       }
       setScrollState(sid, state);
     }, { signal: attachSig });
+
+    // A wheel or trackpad move upward stops following before the scroll
+    // event lands, so a tail snap already queued for the next frame is
+    // cancelled instead of pulling the user back down.
+    transcriptEl.addEventListener('wheel', function(e) {
+      if (e.deltaY >= 0 || userScrolledUp) return;
+      if (transcriptEl.scrollHeight <= transcriptEl.clientHeight) return;
+      setScrolledUp(true);
+      var state = { scrolledUp: true };
+      var a = captureAnchor();
+      if (a) { state.anchorUuid = a.uuid; state.anchorOffset = a.offset; }
+      setScrollState(sid, state);
+    }, { signal: attachSig, passive: true });
 
     // Clicking a Task/Agent card linked to a sub-agent (see
     // TOOL_RENDERERS.Task.result) jumps to that agent's tab. Skip clicks
@@ -5747,6 +5787,9 @@
     function scrollToBottom() {
       if (userScrolledUp) return;
       requestAnimationFrame(function() {
+        // Re-check: a wheel move in the frame between the event and this
+        // callback has stopped following, and the snap must not run.
+        if (userScrolledUp) return;
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
       });
     }
@@ -8619,6 +8662,7 @@
       // typical session-switch reaction time.
       deferTailResnap(800);
       transcriptEl.innerHTML = '';
+      lastScrollTop = 0;
       rendered = Object.create(null);
       activeSubagents = Object.create(null);
       // Full reset of the sub-agent tabs/panes: a fresh init (including
@@ -8777,6 +8821,7 @@
     ownerEl.textContent = (resolvedEntry && resolvedEntry.owner_agent) || '';
     cwdEl.textContent = (resolvedEntry && resolvedEntry.cwd) || '';
     transcriptEl.innerHTML = '';
+    lastScrollTop = 0;
     rendered = Object.create(null);
     activeSubagents = Object.create(null);
     resetAgentTabsUi();
@@ -8812,10 +8857,8 @@
       if (jumpBtn) jumpBtn.classList.remove('is-visible');
       if (transcriptEl) {
         // Capture final scroll state before wiping DOM so re-attach can restore it.
-        var dist = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
-        var scrolledUp = dist > SCROLL_LOCK_THRESHOLD;
-        var teardownState = { scrolledUp: scrolledUp };
-        if (scrolledUp) {
+        var teardownState = { scrolledUp: userScrolledUp };
+        if (userScrolledUp) {
           var anchor = captureAnchor();
           if (anchor) { teardownState.anchorUuid = anchor.uuid; teardownState.anchorOffset = anchor.offset; }
         }
@@ -9687,10 +9730,7 @@
         gripStartH = composeText.getBoundingClientRect().height;
         // Growing the box shrinks the transcript, which would otherwise
         // drift off the tail. Re-pin during the drag if it was pinned.
-        gripPinned = !!transcriptEl && (
-          transcriptEl.scrollHeight - transcriptEl.scrollTop -
-            transcriptEl.clientHeight
-        ) <= SCROLL_LOCK_THRESHOLD;
+        gripPinned = !!transcriptEl && !userScrolledUp;
         composeEl.classList.add('is-resizing');
         document.body.classList.add('cn-compose-resizing');
         try { composeGrip.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
